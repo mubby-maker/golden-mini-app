@@ -9,6 +9,19 @@ const plans = {
   premium: { name: 'Premium', price: 5, daily: 7, days: 15 }
 }
 
+function formatTime(milliseconds) {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1000))
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  const remaining = seconds % 60
+
+  return [
+    String(hours).padStart(2, '0'),
+    String(minutes).padStart(2, '0'),
+    String(remaining).padStart(2, '0')
+  ].join(':')
+}
+
 export default function App() {
   const [page, setPage] = useState('home')
   const [plan, setPlan] = useState('starter')
@@ -33,6 +46,11 @@ export default function App() {
   const [deposits, setDeposits] = useState([])
   const [withdrawals, setWithdrawals] = useState([])
 
+  const [membership, setMembership] = useState(null)
+  const [cycle, setCycle] = useState(null)
+  const [transactions, setTransactions] = useState([])
+  const [now, setNow] = useState(Date.now())
+
   const [message, setMessage] = useState('')
   const [loading, setLoading] = useState(false)
 
@@ -52,10 +70,14 @@ export default function App() {
     }
   }, [])
 
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [])
+
   async function checkSession() {
     try {
       const { data, error } = await supabase.auth.getSession()
-
       if (error) throw error
 
       if (data.session) {
@@ -95,6 +117,55 @@ export default function App() {
       await loadAdminData()
     } else {
       setPage(nextPage)
+
+      if (nextPage === 'member') {
+        await loadMemberData(data.id)
+      }
+    }
+  }
+
+  async function loadMemberData(userId = profile?.id) {
+    if (!userId) return
+
+    const { data: memberships, error: membershipError } =
+      await supabase
+        .from('memberships')
+        .select('*, plans(*)')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+        .limit(1)
+
+    if (membershipError) throw membershipError
+
+    const currentMembership = memberships?.[0] || null
+    setMembership(currentMembership)
+
+    if (currentMembership?.status === 'active') {
+      const [cycleResult, transactionResult] = await Promise.all([
+        supabase
+          .from('reward_cycles')
+          .select('*')
+          .eq('membership_id', currentMembership.id)
+          .in('status', ['running', 'claimable'])
+          .order('started_at', { ascending: false })
+          .limit(1),
+
+        supabase
+          .from('transactions')
+          .select('*')
+          .eq('user_id', userId)
+          .order('created_at', { ascending: false })
+          .limit(20)
+      ])
+
+      if (cycleResult.error) throw cycleResult.error
+      if (transactionResult.error) throw transactionResult.error
+
+      setCycle(cycleResult.data?.[0] || null)
+      setTransactions(transactionResult.data || [])
+    } else {
+      setCycle(null)
+      setTransactions([])
     }
   }
 
@@ -139,15 +210,11 @@ export default function App() {
 
       const { data, error } =
         await supabase.functions.invoke('create-account', {
-          body: {
-            initData,
-            ...form
-          }
+          body: { initData, ...form }
         })
 
       if (error) {
         let details = ''
-
         try {
           details = await error.context.json()
         } catch {
@@ -248,14 +315,112 @@ export default function App() {
     }
   }
 
+  async function startReward() {
+    setLoading(true)
+    setMessage('')
+
+    try {
+      const { data, error } =
+        await supabase.functions.invoke('start-reward-cycle', {
+          body: {}
+        })
+
+      if (error) throw error
+      if (data?.error) throw new Error(data.error)
+
+      await loadMemberData()
+      setMessage('Your 24-hour reward countdown has started!')
+    } catch (error) {
+      setMessage(error.message || 'Unable to start reward cycle.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function claimReward() {
+    setLoading(true)
+    setMessage('')
+
+    try {
+      const { data, error } =
+        await supabase.functions.invoke('claim-reward-cycle', {
+          body: {}
+        })
+
+      if (error) throw error
+      if (data?.error) throw new Error(data.error)
+
+      await loadMemberData()
+      setMessage(
+        `Reward claimed: $${Number(data.claimed_amount).toFixed(2)}`
+      )
+    } catch (error) {
+      setMessage(error.message || 'Unable to claim reward.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function reviewDeposit(depositId, action) {
+    const confirmed = window.confirm(
+      `Are you sure you want to ${action} this deposit?`
+    )
+
+    if (!confirmed) return
+
+    setLoading(true)
+    setMessage('')
+
+    try {
+      const { data, error } =
+        await supabase.functions.invoke('admin-review-deposit', {
+          body: {
+            deposit_id: depositId,
+            action
+          }
+        })
+
+      if (error) throw error
+      if (data?.error) throw new Error(data.error)
+
+      setMessage(data?.message || 'Deposit review completed.')
+      await loadAdminData()
+    } catch (error) {
+      setMessage(error.message || 'Deposit review failed.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function copyText(value) {
+    try {
+      await navigator.clipboard.writeText(value)
+      setMessage('Copied.')
+    } catch {
+      setMessage('Please copy the text manually.')
+    }
+  }
+
   async function logout() {
     await supabase.auth.signOut()
     setProfile(null)
+    setMembership(null)
+    setCycle(null)
     setPage('home')
     setMessage('You have logged out.')
   }
 
-  // Telegram access check
+  const claimTime = cycle
+    ? new Date(cycle.claimable_at).getTime()
+    : 0
+
+  const remaining = Math.max(0, claimTime - now)
+  const isClaimable = Boolean(cycle && remaining === 0)
+
+  const completedDays = transactions.filter(
+    item => item.type === 'reward'
+  ).length
+
   if (!telegramChecked) {
     return (
       <main className="app">
@@ -278,18 +443,12 @@ export default function App() {
         <section className="hero">
           <h1>Welcome to GOLDEN</h1>
           <p>Please open GOLDEN through the Mubby Telegram bot.</p>
-
-          <a
-            href="https://t.me/Mrmubby_bot"
-            className="primary"
-          >
+          <a href="https://t.me/Mrmubby_bot" className="primary">
             Open Mubby on Telegram
           </a>
         </section>
 
-        <footer>
-          <p>GOLDEN • Powered by Mubby</p>
-        </footer>
+        <footer>GOLDEN • Powered by Mubby</footer>
       </main>
     )
   }
@@ -304,7 +463,9 @@ export default function App() {
       {page === 'home' && (
         <>
           <section className="hero">
-            <h1>Welcome to GOLDEN</h1>
+            <div className="crown">♛</div>
+            <div className="eyebrow">WELCOME TO</div>
+            <h1>GOLDEN</h1>
             <p>Choose your membership plan to get started.</p>
           </section>
 
@@ -316,29 +477,19 @@ export default function App() {
                 key={id}
                 onClick={() => setPlan(id)}
               >
-                <h2>{item.name}</h2>
-                <h3>${item.price}</h3>
-                <p>${item.daily} daily reward</p>
-                <p>{item.days} days</p>
+                <span className="plan-name">{item.name}</span>
+                <span className="price">${item.price}</span>
+                <span className="daily">${item.daily} daily reward</span>
+                <span className="duration">{item.days} days</span>
               </button>
             ))}
           </section>
 
-          <div className="selected-summary">
-            Selected: {selectedPlan.name} — ${selectedPlan.price}
-          </div>
-
-          <button
-            className="primary"
-            onClick={() => setPage('register')}
-          >
+          <button className="primary" onClick={() => setPage('register')}>
             Create account
           </button>
 
-          <button
-            className="back"
-            onClick={() => setPage('login')}
-          >
+          <button className="back" onClick={() => setPage('login')}>
             Already registered? Login
           </button>
         </>
@@ -349,57 +500,29 @@ export default function App() {
           <h2>Create your GOLDEN account</h2>
 
           <form onSubmit={register}>
-            <input
-              name="fullName"
-              placeholder="Full name"
-              value={form.fullName}
-              onChange={updateForm}
-              required
-            />
+            <input name="fullName" placeholder="Full name"
+              value={form.fullName} onChange={updateForm} required />
 
-            <input
-              name="username"
-              placeholder="Username"
-              value={form.username}
-              onChange={updateForm}
-              required
-            />
+            <input name="username" placeholder="Username"
+              value={form.username} onChange={updateForm} required />
 
-            <input
-              name="email"
-              type="email"
-              placeholder="Email address"
-              value={form.email}
-              onChange={updateForm}
-              required
-            />
+            <input name="email" type="email" placeholder="Email address"
+              value={form.email} onChange={updateForm} required />
 
-            <input
-              name="password"
-              type="password"
+            <input name="password" type="password"
               placeholder="Password (minimum 10 characters)"
-              value={form.password}
-              onChange={updateForm}
-              minLength={10}
-              required
-            />
+              value={form.password} onChange={updateForm}
+              minLength={10} required />
 
-            <input
-              name="referralCode"
-              placeholder="Referral code (optional)"
-              value={form.referralCode}
-              onChange={updateForm}
-            />
+            <input name="referralCode" placeholder="Referral code (optional)"
+              value={form.referralCode} onChange={updateForm} />
 
             <button className="primary" disabled={loading}>
               {loading ? 'Creating account...' : 'Create account'}
             </button>
           </form>
 
-          <button className="back" onClick={() => setPage('home')}>
-            Back
-          </button>
-
+          <button className="back" onClick={() => setPage('home')}>Back</button>
           <button className="back" onClick={() => setPage('login')}>
             Already registered? Login
           </button>
@@ -411,30 +534,18 @@ export default function App() {
           <h2>Login to GOLDEN</h2>
 
           <form onSubmit={login}>
-            <input
-              type="email"
-              placeholder="Email address"
-              value={email}
-              onChange={e => setEmail(e.target.value)}
-              required
-            />
+            <input type="email" placeholder="Email address"
+              value={email} onChange={e => setEmail(e.target.value)} required />
 
-            <input
-              type="password"
-              placeholder="Password"
-              value={password}
-              onChange={e => setPassword(e.target.value)}
-              required
-            />
+            <input type="password" placeholder="Password"
+              value={password} onChange={e => setPassword(e.target.value)} required />
 
             <button className="primary" disabled={loading}>
               {loading ? 'Logging in...' : 'Login'}
             </button>
           </form>
 
-          <button className="back" onClick={() => setPage('home')}>
-            Back
-          </button>
+          <button className="back" onClick={() => setPage('home')}>Back</button>
         </section>
       )}
 
@@ -446,34 +557,23 @@ export default function App() {
           <p>Network: USDT BEP20 (BNB Smart Chain)</p>
           <p>Send the exact amount to this wallet:</p>
 
-          <p style={{ overflowWrap: 'anywhere' }}>
-            {PAYMENT_WALLET}
-          </p>
+          <p className="wallet-address">{PAYMENT_WALLET}</p>
 
-          <button
-            className="primary"
-            type="button"
-            onClick={copyWallet}
-          >
+          <button className="primary" type="button" onClick={copyWallet}>
             Copy wallet address
           </button>
 
           <form onSubmit={submitPayment}>
-            <input
-              value={transactionHash}
+            <input value={transactionHash}
               onChange={e => setTransactionHash(e.target.value)}
-              placeholder="Paste transaction hash"
-              required
-            />
+              placeholder="Paste transaction hash" required />
 
             <button className="primary" disabled={loading}>
               {loading ? 'Submitting...' : 'Submit payment'}
             </button>
           </form>
 
-          <button className="back" onClick={() => setPage('register')}>
-            Back
-          </button>
+          <button className="back" onClick={() => setPage('home')}>Back</button>
         </section>
       )}
 
@@ -481,31 +581,145 @@ export default function App() {
         <section className="hero">
           <h2>Payment submitted</h2>
           <p>Your payment is awaiting admin verification.</p>
-          <button
-            className="primary"
-            onClick={() => setPage('member')}
-          >
-            Continue
+          <button className="primary" onClick={() => loadProfile('member')}>
+            Refresh membership status
           </button>
         </section>
       )}
 
       {page === 'member' && (
-        <section className="hero">
-          <h2>Welcome, {profile?.full_name || 'Member'}</h2>
-          <p>Your GOLDEN account is ready.</p>
-          <p>Your membership becomes active after payment approval.</p>
+        <section className="member-dashboard">
+          <div className="member-heading">
+            <span className="eyebrow">YOUR GOLDEN ACCOUNT</span>
+            <h2>Welcome, {profile?.full_name || 'Member'}</h2>
+          </div>
 
-          <button
-            className="primary"
-            onClick={() => setPage('payment')}
-          >
-            Continue to payment
+          {!membership && (
+            <div className="notice">
+              <strong>No membership found</strong>
+              <p>Choose a plan to get started.</p>
+              <button className="primary" onClick={() => setPage('home')}>
+                View membership plans
+              </button>
+            </div>
+          )}
+
+          {membership?.status === 'pending' && (
+            <div className="notice">
+              <strong>Payment awaiting approval</strong>
+              <p>Your membership will activate after admin verification.</p>
+              <button className="primary" onClick={() => loadMemberData()}>
+                Refresh status
+              </button>
+            </div>
+          )}
+
+          {membership?.status === 'rejected' && (
+            <div className="notice">
+              <strong>Membership not approved</strong>
+              <p>Please contact GOLDEN support before submitting another payment.</p>
+            </div>
+          )}
+
+          {membership?.status === 'completed' && (
+            <div className="notice">
+              <strong>Reward plan completed</strong>
+              <p>You have completed your membership reward cycles.</p>
+            </div>
+          )}
+
+          {membership?.status === 'active' && (
+            <>
+              <div className="reward-card">
+                <div className="eyebrow">YOUR DAILY REWARD</div>
+
+                <div className="coin-stage">
+                  <div className="gold-coin">G</div>
+                </div>
+
+                <div className="reward-amount">
+                  ${Number(membership.plans?.daily_reward || 0).toFixed(2)}
+                </div>
+
+                <p className="muted">USDT reward per completed cycle</p>
+
+                {cycle ? (
+                  <>
+                    <div className="timer-label">
+                      {isClaimable ? 'YOUR REWARD IS READY' : 'NEXT CLAIM IN'}
+                    </div>
+
+                    <div className="countdown">
+                      {isClaimable ? '00:00:00' : formatTime(remaining)}
+                    </div>
+
+                    {isClaimable ? (
+                      <button className="primary claim-button"
+                        disabled={loading} onClick={claimReward}>
+                        {loading ? 'Claiming...' : 'CLAIM REWARD'}
+                      </button>
+                    ) : (
+                      <button className="primary" disabled>
+                        REWARD COUNTDOWN RUNNING
+                      </button>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <div className="timer-label">READY FOR YOUR NEXT CYCLE?</div>
+                    <button className="primary start-button"
+                      disabled={loading} onClick={startReward}>
+                      {loading ? 'Starting...' : 'START'}
+                    </button>
+                  </>
+                )}
+              </div>
+
+              <div className="progress-card">
+                <h3>REWARD PROGRESS</h3>
+                <p>
+                  Completed cycles: {completedDays} / {membership.plans?.duration_days || 0}
+                </p>
+                <div className="progress-track">
+                  <div
+                    className="progress-fill"
+                    style={{
+                      width: `${Math.min(
+                        100,
+                        (completedDays / (membership.plans?.duration_days || 1)) * 100
+                      )}%`
+                    }}
+                  />
+                </div>
+                <p>
+                  Membership expires: {
+                    membership.expires_at
+                      ? new Date(membership.expires_at).toLocaleDateString()
+                      : 'Not set'
+                  }
+                </p>
+              </div>
+
+              <div className="progress-card">
+                <h3>RECENT REWARDS</h3>
+                {transactions.length === 0 && (
+                  <p className="muted">No rewards claimed yet.</p>
+                )}
+                {transactions.map(item => (
+                  <div className="history-row" key={item.id}>
+                    <span>{new Date(item.created_at).toLocaleDateString()}</span>
+                    <strong>+${Number(item.amount).toFixed(2)}</strong>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+
+          <button className="back" onClick={() => loadMemberData()}>
+            Refresh dashboard
           </button>
 
-          <button className="back" onClick={logout}>
-            Logout
-          </button>
+          <button className="back" onClick={logout}>Logout</button>
         </section>
       )}
 
@@ -514,9 +728,11 @@ export default function App() {
           <h2>GOLDEN Admin Dashboard</h2>
           <p>Welcome, {profile?.full_name || 'Admin'}</p>
 
-          <p>Total members: {members.length}</p>
-          <p>Payment submissions: {deposits.length}</p>
-          <p>Withdrawal requests: {withdrawals.length}</p>
+          <div className="admin-stats">
+            <div>Total members: <strong>{members.length}</strong></div>
+            <div>Payment submissions: <strong>{deposits.length}</strong></div>
+            <div>Withdrawal requests: <strong>{withdrawals.length}</strong></div>
+          </div>
 
           <h3>Recent members</h3>
           {members.slice(0, 10).map(member => (
@@ -525,31 +741,48 @@ export default function App() {
             </p>
           ))}
 
-          <h3>Recent deposits</h3>
-          {deposits.slice(0, 10).map(deposit => (
-            <p key={deposit.id}>
-              {deposit.amount} USDT — {deposit.status}
-            </p>
+          <h3>Deposit submissions</h3>
+          {deposits.length === 0 && <p>No deposits submitted.</p>}
+
+          {deposits.slice(0, 20).map(deposit => (
+            <div className="admin-item" key={deposit.id}>
+              <strong>{Number(deposit.amount).toFixed(2)} USDT</strong>
+              <p>Status: {deposit.status}</p>
+              <p>Transaction: {deposit.transaction_hash || 'Not supplied'}</p>
+              <p className="small-text">Deposit ID: {deposit.id}</p>
+
+              {deposit.status === 'pending' && (
+                <div className="admin-actions">
+                  <button className="primary"
+                    disabled={loading}
+                    onClick={() => reviewDeposit(deposit.id, 'approve')}>
+                    Approve
+                  </button>
+
+                  <button className="danger"
+                    disabled={loading}
+                    onClick={() => reviewDeposit(deposit.id, 'reject')}>
+                    Reject
+                  </button>
+                </div>
+              )}
+            </div>
           ))}
 
           <h3>Recent withdrawals</h3>
           {withdrawals.slice(0, 10).map(item => (
-            <p key={item.id}>
-              {item.amount} USDT — {item.status}
-            </p>
+            <div className="admin-item" key={item.id}>
+              <strong>{item.amount} USDT</strong>
+              <p>Status: {item.status}</p>
+            </div>
           ))}
 
-          <button className="back" onClick={loadAdminData}>
-            Refresh
-          </button>
-
-          <button className="back" onClick={logout}>
-            Logout
-          </button>
+          <button className="back" onClick={loadAdminData}>Refresh</button>
+          <button className="back" onClick={logout}>Logout</button>
         </section>
       )}
 
-      {message && <p role="status">{message}</p>}
+      {message && <p className="status-message" role="status">{message}</p>}
 
       <footer>
         <p>GOLDEN • Powered by Mubby</p>
