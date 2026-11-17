@@ -28,20 +28,22 @@ export default function App() {
   const [withdrawals, setWithdrawals] = useState([])
   const [message, setMessage] = useState('')
   const [loading, setLoading] = useState(false)
-
+  const [telegramChecked, setTelegramChecked] = useState(false)
+  const [insideTelegram, setInsideTelegram] = useState(false)
   const selectedPlan = plans[plan]
+useEffect(() => {
+  const tg = window.Telegram?.WebApp
+  const validTelegram = Boolean(tg?.initData)
 
-  useEffect(() => {
-    window.Telegram?.WebApp?.ready()
-    window.Telegram?.WebApp?.expand()
+  setInsideTelegram(validTelegram)
+  setTelegramChecked(true)
 
+  if (validTelegram) {
+    tg.ready()
+    tg.expand()
     checkSession()
-  }, [])
-
-  async function checkSession() {
-    const { data } = await supabase.auth.getSession()
-
-    if (data.session) {
+  }
+}, [])
       await loadProfile()
     }
   }
@@ -221,7 +223,23 @@ export default function App() {
     setPage('home')
     setMessage('You have logged out.')
   }
+if (!telegramChecked) {
+  return <main className="app">Loading GOLDEN...</main>
+}
 
+if (!insideTelegram) {
+  return (
+    <main className="app">
+      <section className="hero">
+        <h1>GOLDEN</h1>
+        <p>Please open GOLDEN through the Mubby Telegram bot.</p>
+        <a href="https://t.me/Mrmubby_bot" className="primary">
+          Open Mubby on Telegram
+        </a>
+      </section>
+    </main>
+  )
+}
   return (
     <main className="app">
       <header className="topbar">
