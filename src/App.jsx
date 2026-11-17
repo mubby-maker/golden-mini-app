@@ -5,23 +5,14 @@ const PAYMENT_WALLET = '0xF8354B188fAC6B6341273641de4F014921F82032'
 const OWNER_TELEGRAM_ID = '9278551040'
 
 const plans = {
-  starter: {
-    name: 'Starter',
-    price: 1,
-    daily: 1,
-    days: 30
-  },
-  premium: {
-    name: 'Premium',
-    price: 5,
-    daily: 7,
-    days: 15
-  }
+  starter: { name: 'Starter', price: 1, daily: 1, days: 30 },
+  premium: { name: 'Premium', price: 5, daily: 7, days: 15 }
 }
 
 export default function App() {
   const [page, setPage] = useState('home')
   const [plan, setPlan] = useState('starter')
+  const [profile, setProfile] = useState(null)
   const [form, setForm] = useState({
     fullName: '',
     username: '',
@@ -29,84 +20,74 @@ export default function App() {
     password: '',
     referralCode: ''
   })
-  const [loginForm, setLoginForm] = useState({
-    email: '',
-    password: ''
-  })
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
   const [transactionHash, setTransactionHash] = useState('')
+  const [members, setMembers] = useState([])
+  const [deposits, setDeposits] = useState([])
+  const [withdrawals, setWithdrawals] = useState([])
   const [message, setMessage] = useState('')
   const [loading, setLoading] = useState(false)
-  const [profile, setProfile] = useState(null)
-  const [copied, setCopied] = useState(false)
-  const [adminData, setAdminData] = useState({
-    members: [],
-    deposits: [],
-    withdrawals: []
-  })
 
   const selectedPlan = plans[plan]
-  const isAdmin = profile?.is_admin === true ||
-    String(profile?.telegram_id) === OWNER_TELEGRAM_ID
 
   useEffect(() => {
-    const telegram = window.Telegram?.WebApp
-    telegram?.ready()
-    telegram?.expand()
+    window.Telegram?.WebApp?.ready()
+    window.Telegram?.WebApp?.expand()
 
-    checkExistingSession()
-
-    return () => {
-      telegram?.BackButton?.hide()
-    }
+    checkSession()
   }, [])
 
-  useEffect(() => {
-    const telegramBack = window.Telegram?.WebApp?.BackButton
-    if (!telegramBack) return
-
-    const canGoBack = ['register', 'payment', 'login', 'admin'].includes(page)
-
-    if (canGoBack) {
-      telegramBack.show()
-      telegramBack.onClick(goBack)
-    } else {
-      telegramBack.hide()
-    }
-
-    return () => telegramBack.offClick(goBack)
-  }, [page])
-
-  async function checkExistingSession() {
+  async function checkSession() {
     const { data } = await supabase.auth.getSession()
-    if (data?.session?.user) {
-      await loadProfile(data.session.user.id)
+
+    if (data.session) {
+      await loadProfile()
     }
   }
 
-  async function loadProfile(userId) {
+  async function loadProfile() {
+    const { data: authData } = await supabase.auth.getUser()
+
+    if (!authData.user) {
+      setPage('home')
+      return
+    }
+
     const { data, error } = await supabase
       .from('profiles')
       .select('*')
-      .eq('id', userId)
+      .eq('id', authData.user.id)
       .single()
 
     if (error) {
-      setMessage('Could not load your GOLDEN profile.')
+      setMessage('Could not load your account: ' + error.message)
       return
     }
 
     setProfile(data)
-    setPage(data.is_admin ? 'admin' : 'member')
-    if (data.is_admin) loadAdminData()
+
+    if (
+      data.is_admin ||
+      String(data.telegram_id) === OWNER_TELEGRAM_ID
+    ) {
+      setPage('admin')
+      await loadAdminData()
+    } else {
+      setPage('member')
+    }
   }
 
-  function goBack() {
-    setMessage('')
+  async function loadAdminData() {
+    const [m, d, w] = await Promise.all([
+      supabase.from('profiles').select('*').order('created_at', { ascending: false }),
+      supabase.from('deposits').select('*').order('created_at', { ascending: false }),
+      supabase.from('withdrawals').select('*').order('created_at', { ascending: false })
+    ])
 
-    if (page === 'payment') setPage('register')
-    else if (page === 'register' || page === 'login') setPage('home')
-    else if (page === 'admin' || page === 'member') setPage('home')
-    else setPage('home')
+    if (!m.error) setMembers(m.data || [])
+    if (!d.error) setDeposits(d.data || [])
+    if (!w.error) setWithdrawals(w.data || [])
   }
 
   function updateForm(event) {
@@ -122,24 +103,17 @@ export default function App() {
       const initData = window.Telegram?.WebApp?.initData
 
       if (!initData) {
-        throw new Error('Please open GOLDEN through the Mubby Telegram bot.')
+        throw new Error('Open GOLDEN from the Mubby Telegram bot.')
       }
 
       const { data, error } = await supabase.functions.invoke(
         'create-account',
         {
-          body: {
-            initData,
-            ...form
-          }
+          body: { initData, ...form }
         }
       )
 
-      if (error) {
-        const details = await error.context?.json?.().catch(() => null)
-        throw new Error(details?.error || error.message)
-      }
-
+      if (error) throw error
       if (data?.error) throw new Error(data.error)
 
       const { error: loginError } =
@@ -150,15 +124,20 @@ export default function App() {
 
       if (loginError) throw loginError
 
-      const { data: userData } = await supabase.auth.getUser()
-
-      if (userData?.user) {
-        await loadProfile(userData.user.id)
-      }
-
-      setMessage('Your GOLDEN account has been created.')
+      await loadProfile()
     } catch (error) {
-      setMessage(error.message || 'Registration failed.')
+      const text = error.message || 'Registration failed.'
+
+      if (
+        text.includes('409') ||
+        text.toLowerCase().includes('already exists') ||
+        text.toLowerCase().includes('already registered')
+      ) {
+        setMessage('Your account may already exist. Please use Login instead.')
+        setPage('login')
+      } else {
+        setMessage(text)
+      }
     } finally {
       setLoading(false)
     }
@@ -170,14 +149,14 @@ export default function App() {
     setMessage('')
 
     try {
-      const { data, error } = await supabase.auth.signInWithPassword({
-        email: loginForm.email,
-        password: loginForm.password
+      const { error } = await supabase.auth.signInWithPassword({
+        email,
+        password
       })
 
       if (error) throw error
 
-      await loadProfile(data.user.id)
+      await loadProfile()
     } catch (error) {
       setMessage(error.message || 'Login failed.')
     } finally {
@@ -185,22 +164,14 @@ export default function App() {
     }
   }
 
-  async function logout() {
-    await supabase.auth.signOut()
-    setProfile(null)
-    setPage('home')
-    setMessage('You have signed out.')
-  }
-
-  async function copyWallet() {
-    try {
-      await navigator.clipboard.writeText(PAYMENT_WALLET)
-      setCopied(true)
-      setMessage('Wallet address copied.')
-      setTimeout(() => setCopied(false), 2500)
-    } catch {
-      setMessage('Copy unavailable. Please select and copy the address manually.')
+  async function continueToPayment() {
+    if (!profile) {
+      setMessage('Please log in first.')
+      return
     }
+
+    setPage('payment')
+    setMessage('')
   }
 
   async function submitPayment(event) {
@@ -223,15 +194,11 @@ export default function App() {
         }
       )
 
-      if (error) {
-        const details = await error.context?.json?.().catch(() => null)
-        throw new Error(details?.error || error.message)
-      }
-
+      if (error) throw error
       if (data?.error) throw new Error(data.error)
 
       setPage('pending')
-      setMessage('Your payment submission has been received.')
+      setMessage('Payment submitted for admin verification.')
     } catch (error) {
       setMessage(error.message || 'Payment submission failed.')
     } finally {
@@ -239,35 +206,27 @@ export default function App() {
     }
   }
 
-  async function loadAdminData() {
-    setLoading(true)
-
-    const [members, deposits, withdrawals] = await Promise.all([
-      supabase.from('profiles').select('*').order('created_at', { ascending: false }),
-      supabase.from('deposits').select('*').order('created_at', { ascending: false }),
-      supabase.from('withdrawals').select('*').order('created_at', { ascending: false })
-    ])
-
-    setAdminData({
-      members: members.data || [],
-      deposits: deposits.data || [],
-      withdrawals: withdrawals.data || []
-    })
-
-    if (members.error || deposits.error || withdrawals.error) {
-      setMessage('Some Admin information could not be loaded.')
+  async function copyWallet() {
+    try {
+      await navigator.clipboard.writeText(PAYMENT_WALLET)
+      setMessage('Wallet address copied.')
+    } catch {
+      setMessage('Please copy the wallet address manually.')
     }
+  }
 
-    setLoading(false)
+  async function logout() {
+    await supabase.auth.signOut()
+    setProfile(null)
+    setPage('home')
+    setMessage('You have logged out.')
   }
 
   return (
     <main className="app">
       <header className="topbar">
         <div className="brand">GOLDEN</div>
-        <span className="badge">
-          {isAdmin ? 'ADMIN' : 'MEMBERSHIP'}
-        </span>
+        <span className="badge">MEMBERSHIP</span>
       </header>
 
       {page === 'home' && (
@@ -302,7 +261,7 @@ export default function App() {
           </button>
 
           <button className="back" onClick={() => setPage('login')}>
-            Already registered? Log in
+            Already registered? Login
           </button>
         </>
       )}
@@ -323,60 +282,61 @@ export default function App() {
             </button>
           </form>
 
-          <button className="back" onClick={goBack}>Back</button>
+          <button className="back" onClick={() => setPage('home')}>Back</button>
+          <button className="back" onClick={() => setPage('login')}>Already registered? Login</button>
         </section>
       )}
 
       {page === 'login' && (
         <section className="registration">
-          <h2>Welcome back</h2>
+          <h2>Login to GOLDEN</h2>
 
           <form onSubmit={login}>
             <input
               type="email"
               placeholder="Email address"
-              value={loginForm.email}
-              onChange={e => setLoginForm({ ...loginForm, email: e.target.value })}
+              value={email}
+              onChange={e => setEmail(e.target.value)}
               required
             />
 
             <input
               type="password"
               placeholder="Password"
-              value={loginForm.password}
-              onChange={e => setLoginForm({ ...loginForm, password: e.target.value })}
+              value={password}
+              onChange={e => setPassword(e.target.value)}
               required
             />
 
             <button className="primary" disabled={loading}>
-              {loading ? 'Logging in...' : 'Log in'}
+              {loading ? 'Logging in...' : 'Login'}
             </button>
           </form>
 
-          <button className="back" onClick={goBack}>Back</button>
+          <button className="back" onClick={() => setPage('home')}>Back</button>
         </section>
       )}
 
       {page === 'payment' && (
         <section className="registration">
-          <button className="back" onClick={goBack}>← Back</button>
-
           <h2>Complete your payment</h2>
           <p>Plan: {selectedPlan.name}</p>
           <h2>${selectedPlan.price} USDT</h2>
           <p>Network: USDT BEP20 (BNB Smart Chain)</p>
           <p>Send the exact amount to this wallet:</p>
 
-          <p style={{ overflowWrap: 'anywhere' }}>{PAYMENT_WALLET}</p>
+          <p style={{ overflowWrap: 'anywhere' }}>
+            {PAYMENT_WALLET}
+          </p>
 
-          <button type="button" className="primary" onClick={copyWallet}>
-            {copied ? 'Copied!' : 'Copy wallet address'}
+          <button className="primary" type="button" onClick={copyWallet}>
+            Copy wallet address
           </button>
 
           <form onSubmit={submitPayment}>
             <input
               value={transactionHash}
-              onChange={event => setTransactionHash(event.target.value)}
+              onChange={e => setTransactionHash(e.target.value)}
               placeholder="Paste transaction hash"
               required
             />
@@ -385,63 +345,64 @@ export default function App() {
               {loading ? 'Submitting...' : 'Submit payment'}
             </button>
           </form>
+
+          <button className="back" onClick={() => setPage('member')}>Back</button>
         </section>
       )}
 
       {page === 'pending' && (
         <section className="hero">
           <h2>Payment submitted</h2>
-          <p>Your payment is awaiting Admin verification.</p>
-          <button className="back" onClick={logout}>Sign out</button>
+          <p>Your payment is awaiting admin verification.</p>
+          <button className="primary" onClick={() => setPage('member')}>Continue</button>
         </section>
       )}
 
       {page === 'member' && (
         <section className="hero">
-          <h2>Welcome, {profile?.full_name}</h2>
-          <p>Your GOLDEN member account is ready.</p>
-          <p>Membership and reward details will appear here.</p>
-          <button className="back" onClick={logout}>Sign out</button>
+          <h2>Welcome, {profile?.full_name || 'Member'}</h2>
+          <p>Your GOLDEN account is ready.</p>
+          <p>Membership and rewards become available after payment approval.</p>
+
+          <button className="primary" onClick={continueToPayment}>
+            Continue to payment
+          </button>
+
+          <button className="back" onClick={logout}>Logout</button>
         </section>
       )}
 
       {page === 'admin' && (
         <section className="registration">
           <h2>GOLDEN Admin Dashboard</h2>
-          <p>Welcome, {profile?.full_name || 'Admin'} 👑</p>
-
-          <div className="selected-summary">
-            <h3>Members: {adminData.members.length}</h3>
-            <h3>Deposits: {adminData.deposits.length}</h3>
-            <h3>Withdrawal requests: {adminData.withdrawals.length}</h3>
-          </div>
+          <p>Welcome, {profile?.full_name || 'Admin'}</p>
+          <p>Total members: {members.length}</p>
+          <p>Payment submissions: {deposits.length}</p>
+          <p>Withdrawal requests: {withdrawals.length}</p>
 
           <h3>Recent members</h3>
-          {adminData.members.slice(0, 10).map(member => (
+          {members.slice(0, 10).map(member => (
             <p key={member.id}>
               {member.full_name} — {member.email}
             </p>
           ))}
 
           <h3>Recent deposits</h3>
-          {adminData.deposits.slice(0, 10).map(deposit => (
+          {deposits.slice(0, 10).map(deposit => (
             <p key={deposit.id}>
-              ${deposit.amount} — {deposit.status}
+              {deposit.amount} USDT — {deposit.status}
             </p>
           ))}
 
           <h3>Recent withdrawals</h3>
-          {adminData.withdrawals.slice(0, 10).map(withdrawal => (
-            <p key={withdrawal.id}>
-              ${withdrawal.amount} — {withdrawal.status}
+          {withdrawals.slice(0, 10).map(item => (
+            <p key={item.id}>
+              {item.amount} USDT — {item.status}
             </p>
           ))}
 
-          <button className="primary" onClick={loadAdminData} disabled={loading}>
-            {loading ? 'Refreshing...' : 'Refresh dashboard'}
-          </button>
-
-          <button className="back" onClick={logout}>Sign out</button>
+          <button className="back" onClick={loadAdminData}>Refresh</button>
+          <button className="back" onClick={logout}>Logout</button>
         </section>
       )}
 
