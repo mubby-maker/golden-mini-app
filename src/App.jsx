@@ -44,9 +44,6 @@ useEffect(() => {
     checkSession()
   }
 }, [])
-      await loadProfile()
-    }
-  }
 
   async function loadProfile() {
     const { data: authData } = await supabase.auth.getUser()
