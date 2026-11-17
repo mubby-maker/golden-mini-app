@@ -13,6 +13,10 @@ export default function App() {
   const [page, setPage] = useState('home')
   const [plan, setPlan] = useState('starter')
   const [profile, setProfile] = useState(null)
+
+  const [telegramChecked, setTelegramChecked] = useState(false)
+  const [insideTelegram, setInsideTelegram] = useState(false)
+
   const [form, setForm] = useState({
     fullName: '',
     username: '',
@@ -20,33 +24,53 @@ export default function App() {
     password: '',
     referralCode: ''
   })
+
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [transactionHash, setTransactionHash] = useState('')
+
   const [members, setMembers] = useState([])
   const [deposits, setDeposits] = useState([])
   const [withdrawals, setWithdrawals] = useState([])
+
   const [message, setMessage] = useState('')
   const [loading, setLoading] = useState(false)
-  const [telegramChecked, setTelegramChecked] = useState(false)
-  const [insideTelegram, setInsideTelegram] = useState(false)
+
   const selectedPlan = plans[plan]
-useEffect(() => {
-  const tg = window.Telegram?.WebApp
-  const validTelegram = Boolean(tg?.initData)
 
-  setInsideTelegram(validTelegram)
-  setTelegramChecked(true)
+  useEffect(() => {
+    const tg = window.Telegram?.WebApp
+    const validTelegram = Boolean(tg?.initData)
 
-  if (validTelegram) {
-    tg.ready()
-    tg.expand()
-    checkSession()
+    setInsideTelegram(validTelegram)
+    setTelegramChecked(true)
+
+    if (validTelegram) {
+      tg.ready()
+      tg.expand()
+      checkSession()
+    }
+  }, [])
+
+  async function checkSession() {
+    try {
+      const { data, error } = await supabase.auth.getSession()
+
+      if (error) throw error
+
+      if (data.session) {
+        await loadProfile('member')
+      }
+    } catch (error) {
+      setMessage(error.message || 'Unable to check your session.')
+    }
   }
-}, [])
 
-  async function loadProfile() {
-    const { data: authData } = await supabase.auth.getUser()
+  async function loadProfile(nextPage = 'member') {
+    const { data: authData, error: authError } =
+      await supabase.auth.getUser()
+
+    if (authError) throw authError
 
     if (!authData.user) {
       setPage('home')
@@ -59,10 +83,7 @@ useEffect(() => {
       .eq('id', authData.user.id)
       .single()
 
-    if (error) {
-      setMessage('Could not load your account: ' + error.message)
-      return
-    }
+    if (error) throw error
 
     setProfile(data)
 
@@ -73,15 +94,23 @@ useEffect(() => {
       setPage('admin')
       await loadAdminData()
     } else {
-      setPage('member')
+      setPage(nextPage)
     }
   }
 
   async function loadAdminData() {
     const [m, d, w] = await Promise.all([
-      supabase.from('profiles').select('*').order('created_at', { ascending: false }),
-      supabase.from('deposits').select('*').order('created_at', { ascending: false }),
-      supabase.from('withdrawals').select('*').order('created_at', { ascending: false })
+      supabase.from('profiles')
+        .select('*')
+        .order('created_at', { ascending: false }),
+
+      supabase.from('deposits')
+        .select('*')
+        .order('created_at', { ascending: false }),
+
+      supabase.from('withdrawals')
+        .select('*')
+        .order('created_at', { ascending: false })
     ])
 
     if (!m.error) setMembers(m.data || [])
@@ -90,7 +119,10 @@ useEffect(() => {
   }
 
   function updateForm(event) {
-    setForm({ ...form, [event.target.name]: event.target.value })
+    setForm({
+      ...form,
+      [event.target.name]: event.target.value
+    })
   }
 
   async function register(event) {
@@ -102,17 +134,31 @@ useEffect(() => {
       const initData = window.Telegram?.WebApp?.initData
 
       if (!initData) {
-        throw new Error('Open GOLDEN from the Mubby Telegram bot.')
+        throw new Error('Please open GOLDEN through Mubby on Telegram.')
       }
 
-      const { data, error } = await supabase.functions.invoke(
-        'create-account',
-        {
-          body: { initData, ...form }
-        }
-      )
+      const { data, error } =
+        await supabase.functions.invoke('create-account', {
+          body: {
+            initData,
+            ...form
+          }
+        })
 
-      if (error) throw error
+      if (error) {
+        let details = ''
+
+        try {
+          details = await error.context.json()
+        } catch {
+          details = error.message
+        }
+
+        throw new Error(
+          details?.error || details?.message || error.message
+        )
+      }
+
       if (data?.error) throw new Error(data.error)
 
       const { error: loginError } =
@@ -123,7 +169,7 @@ useEffect(() => {
 
       if (loginError) throw loginError
 
-      await loadProfile()
+      await loadProfile('payment')
     } catch (error) {
       const text = error.message || 'Registration failed.'
 
@@ -132,8 +178,8 @@ useEffect(() => {
         text.toLowerCase().includes('already exists') ||
         text.toLowerCase().includes('already registered')
       ) {
-        setMessage('Your account may already exist. Please use Login instead.')
         setPage('login')
+        setMessage('Your account may already exist. Please log in.')
       } else {
         setMessage(text)
       }
@@ -155,22 +201,12 @@ useEffect(() => {
 
       if (error) throw error
 
-      await loadProfile()
+      await loadProfile('member')
     } catch (error) {
       setMessage(error.message || 'Login failed.')
     } finally {
       setLoading(false)
     }
-  }
-
-  async function continueToPayment() {
-    if (!profile) {
-      setMessage('Please log in first.')
-      return
-    }
-
-    setPage('payment')
-    setMessage('')
   }
 
   async function submitPayment(event) {
@@ -183,15 +219,13 @@ useEffect(() => {
         throw new Error('Please enter a valid transaction hash.')
       }
 
-      const { data, error } = await supabase.functions.invoke(
-        'submit-deposit',
-        {
+      const { data, error } =
+        await supabase.functions.invoke('submit-deposit', {
           body: {
             planId: plan,
             transactionHash: transactionHash.trim()
           }
-        }
-      )
+        })
 
       if (error) throw error
       if (data?.error) throw new Error(data.error)
@@ -220,23 +254,46 @@ useEffect(() => {
     setPage('home')
     setMessage('You have logged out.')
   }
-if (!telegramChecked) {
-  return <main className="app">Loading GOLDEN...</main>
-}
 
-if (!insideTelegram) {
-  return (
-    <main className="app">
-      <section className="hero">
-        <h1>GOLDEN</h1>
-        <p>Please open GOLDEN through the Mubby Telegram bot.</p>
-        <a href="https://t.me/Mrmubby_bot" className="primary">
-          Open Mubby on Telegram
-        </a>
-      </section>
-    </main>
-  )
-}
+  // Telegram access check
+  if (!telegramChecked) {
+    return (
+      <main className="app">
+        <section className="hero">
+          <h1>GOLDEN</h1>
+          <p>Loading...</p>
+        </section>
+      </main>
+    )
+  }
+
+  if (!insideTelegram) {
+    return (
+      <main className="app">
+        <header className="topbar">
+          <div className="brand">GOLDEN</div>
+          <span className="badge">MEMBERSHIP</span>
+        </header>
+
+        <section className="hero">
+          <h1>Welcome to GOLDEN</h1>
+          <p>Please open GOLDEN through the Mubby Telegram bot.</p>
+
+          <a
+            href="https://t.me/Mrmubby_bot"
+            className="primary"
+          >
+            Open Mubby on Telegram
+          </a>
+        </section>
+
+        <footer>
+          <p>GOLDEN • Powered by Mubby</p>
+        </footer>
+      </main>
+    )
+  }
+
   return (
     <main className="app">
       <header className="topbar">
@@ -271,11 +328,17 @@ if (!insideTelegram) {
             Selected: {selectedPlan.name} — ${selectedPlan.price}
           </div>
 
-          <button className="primary" onClick={() => setPage('register')}>
+          <button
+            className="primary"
+            onClick={() => setPage('register')}
+          >
             Create account
           </button>
 
-          <button className="back" onClick={() => setPage('login')}>
+          <button
+            className="back"
+            onClick={() => setPage('login')}
+          >
             Already registered? Login
           </button>
         </>
@@ -286,19 +349,60 @@ if (!insideTelegram) {
           <h2>Create your GOLDEN account</h2>
 
           <form onSubmit={register}>
-            <input name="fullName" placeholder="Full name" value={form.fullName} onChange={updateForm} required />
-            <input name="username" placeholder="Username" value={form.username} onChange={updateForm} required />
-            <input name="email" type="email" placeholder="Email address" value={form.email} onChange={updateForm} required />
-            <input name="password" type="password" placeholder="Password (minimum 10 characters)" value={form.password} onChange={updateForm} minLength={10} required />
-            <input name="referralCode" placeholder="Referral code (optional)" value={form.referralCode} onChange={updateForm} />
+            <input
+              name="fullName"
+              placeholder="Full name"
+              value={form.fullName}
+              onChange={updateForm}
+              required
+            />
+
+            <input
+              name="username"
+              placeholder="Username"
+              value={form.username}
+              onChange={updateForm}
+              required
+            />
+
+            <input
+              name="email"
+              type="email"
+              placeholder="Email address"
+              value={form.email}
+              onChange={updateForm}
+              required
+            />
+
+            <input
+              name="password"
+              type="password"
+              placeholder="Password (minimum 10 characters)"
+              value={form.password}
+              onChange={updateForm}
+              minLength={10}
+              required
+            />
+
+            <input
+              name="referralCode"
+              placeholder="Referral code (optional)"
+              value={form.referralCode}
+              onChange={updateForm}
+            />
 
             <button className="primary" disabled={loading}>
               {loading ? 'Creating account...' : 'Create account'}
             </button>
           </form>
 
-          <button className="back" onClick={() => setPage('home')}>Back</button>
-          <button className="back" onClick={() => setPage('login')}>Already registered? Login</button>
+          <button className="back" onClick={() => setPage('home')}>
+            Back
+          </button>
+
+          <button className="back" onClick={() => setPage('login')}>
+            Already registered? Login
+          </button>
         </section>
       )}
 
@@ -328,7 +432,9 @@ if (!insideTelegram) {
             </button>
           </form>
 
-          <button className="back" onClick={() => setPage('home')}>Back</button>
+          <button className="back" onClick={() => setPage('home')}>
+            Back
+          </button>
         </section>
       )}
 
@@ -344,7 +450,11 @@ if (!insideTelegram) {
             {PAYMENT_WALLET}
           </p>
 
-          <button className="primary" type="button" onClick={copyWallet}>
+          <button
+            className="primary"
+            type="button"
+            onClick={copyWallet}
+          >
             Copy wallet address
           </button>
 
@@ -361,7 +471,9 @@ if (!insideTelegram) {
             </button>
           </form>
 
-          <button className="back" onClick={() => setPage('member')}>Back</button>
+          <button className="back" onClick={() => setPage('register')}>
+            Back
+          </button>
         </section>
       )}
 
@@ -369,7 +481,12 @@ if (!insideTelegram) {
         <section className="hero">
           <h2>Payment submitted</h2>
           <p>Your payment is awaiting admin verification.</p>
-          <button className="primary" onClick={() => setPage('member')}>Continue</button>
+          <button
+            className="primary"
+            onClick={() => setPage('member')}
+          >
+            Continue
+          </button>
         </section>
       )}
 
@@ -377,13 +494,18 @@ if (!insideTelegram) {
         <section className="hero">
           <h2>Welcome, {profile?.full_name || 'Member'}</h2>
           <p>Your GOLDEN account is ready.</p>
-          <p>Membership and rewards become available after payment approval.</p>
+          <p>Your membership becomes active after payment approval.</p>
 
-          <button className="primary" onClick={continueToPayment}>
+          <button
+            className="primary"
+            onClick={() => setPage('payment')}
+          >
             Continue to payment
           </button>
 
-          <button className="back" onClick={logout}>Logout</button>
+          <button className="back" onClick={logout}>
+            Logout
+          </button>
         </section>
       )}
 
@@ -391,6 +513,7 @@ if (!insideTelegram) {
         <section className="registration">
           <h2>GOLDEN Admin Dashboard</h2>
           <p>Welcome, {profile?.full_name || 'Admin'}</p>
+
           <p>Total members: {members.length}</p>
           <p>Payment submissions: {deposits.length}</p>
           <p>Withdrawal requests: {withdrawals.length}</p>
@@ -416,8 +539,13 @@ if (!insideTelegram) {
             </p>
           ))}
 
-          <button className="back" onClick={loadAdminData}>Refresh</button>
-          <button className="back" onClick={logout}>Logout</button>
+          <button className="back" onClick={loadAdminData}>
+            Refresh
+          </button>
+
+          <button className="back" onClick={logout}>
+            Logout
+          </button>
         </section>
       )}
 
