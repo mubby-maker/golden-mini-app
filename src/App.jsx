@@ -1,1019 +1,949 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { supabase } from './supabase'
+import {
+  Crown, Wallet, Gift, Users, LogOut, Home, Clock,
+  CheckCircle, XCircle, RefreshCw, ArrowDownToLine,
+  ShieldCheck, Copy, ExternalLink, Menu, X, CreditCard,
+  History, User, AlertCircle
+} from 'lucide-react'
 
+const ADMIN_TELEGRAM_ID = '9278551040'
 const PAYMENT_WALLET = '0xF8354B188fAC6B6341273641de4F014921F82032'
-const OWNER_TELEGRAM_ID = '9278551040'
+const NETWORK = 'USDT BEP20'
 const MINIMUM_WITHDRAWAL = 10
+const REFERRAL_BONUS = 0.70
 
-const plans = {
-  starter: { name: 'Starter', price: 1, daily: 1, days: 30 },
-  premium: { name: 'Premium', price: 5, daily: 7, days: 15 }
-}
+const PLANS = [
+  { id: 'starter', name: 'Starter', price: 1, reward: 1, days: 30 },
+  { id: 'premium', name: 'Premium', price: 5, reward: 7, days: 15 }
+]
 
-function formatTime(milliseconds) {
-  const seconds = Math.max(0, Math.floor(milliseconds / 1000))
-  const hours = Math.floor(seconds / 3600)
-  const minutes = Math.floor((seconds % 3600) / 60)
-  const remaining = seconds % 60
+const money = value => `$${Number(value || 0).toFixed(2)}`
 
-  return [
-    String(hours).padStart(2, '0'),
-    String(minutes).padStart(2, '0'),
-    String(remaining).padStart(2, '0')
-  ].join(':')
-}
-
-function formatMoney(value) {
-  return Number(value || 0).toFixed(2)
-}
-
-export default function App() {
-  const [page, setPage] = useState('home')
-  const [plan, setPlan] = useState('starter')
+function App() {
+  const [session, setSession] = useState(null)
   const [profile, setProfile] = useState(null)
+  const [page, setPage] = useState('home')
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState('')
+  const [error, setError] = useState('')
+  const [menuOpen, setMenuOpen] = useState(false)
 
-  const [telegramChecked, setTelegramChecked] = useState(false)
-  const [insideTelegram, setInsideTelegram] = useState(false)
-
-  const [form, setForm] = useState({
-    fullName: '',
-    username: '',
-    email: '',
-    password: '',
-    referralCode: ''
-  })
-
+  const [fullName, setFullName] = useState('')
+  const [username, setUsername] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [referralCode, setReferralCode] = useState('')
+  const [authMode, setAuthMode] = useState('login')
+
+  const [selectedPlan, setSelectedPlan] = useState('starter')
   const [transactionHash, setTransactionHash] = useState('')
+  const [membershipId, setMembershipId] = useState('')
+
+  const [memberships, setMemberships] = useState([])
+  const [transactions, setTransactions] = useState([])
+  const [withdrawals, setWithdrawals] = useState([])
+  const [referrals, setReferrals] = useState([])
+  const [cycles, setCycles] = useState([])
+  const [deposits, setDeposits] = useState([])
+  const [members, setMembers] = useState([])
+  const [adminWithdrawals, setAdminWithdrawals] = useState([])
 
   const [withdrawAmount, setWithdrawAmount] = useState('')
   const [withdrawWallet, setWithdrawWallet] = useState('')
-  const [paidHash, setPaidHash] = useState({})
 
-  const [members, setMembers] = useState([])
-  const [deposits, setDeposits] = useState([])
-  const [withdrawals, setWithdrawals] = useState([])
+  const telegram = window.Telegram?.WebApp
+  const initData = telegram?.initData || ''
+  const telegramUser = telegram?.initDataUnsafe?.user
 
-  const [membership, setMembership] = useState(null)
-  const [cycle, setCycle] = useState(null)
-  const [transactions, setTransactions] = useState([])
-  const [now, setNow] = useState(Date.now())
+  const isAdmin = profile?.is_admin === true &&
+    String(profile?.telegram_id || '') === ADMIN_TELEGRAM_ID
 
-  const [message, setMessage] = useState('')
-  const [loading, setLoading] = useState(false)
-
-  const selectedPlan = plans[plan]
+  const balance = useMemo(
+    () => transactions.reduce((sum, item) => sum + Number(item.amount || 0), 0),
+    [transactions]
+  )
 
   useEffect(() => {
-    const tg = window.Telegram?.WebApp
-    const validTelegram = Boolean(tg?.initData)
+    telegram?.ready()
+    telegram?.expand()
 
-    setInsideTelegram(validTelegram)
-    setTelegramChecked(true)
-
-    if (validTelegram) {
-      tg.ready()
-      tg.expand()
-      checkSession()
-    }
-  }, [])
-
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 1000)
-    return () => clearInterval(timer)
-  }, [])
-
-  async function checkSession() {
-    try {
-      const { data, error } = await supabase.auth.getSession()
-      if (error) throw error
-
-      if (data.session) {
-        await loadProfile('member')
+    const { data: listener } = supabase.auth.onAuthStateChange(
+      (_event, currentSession) => {
+        setSession(currentSession)
       }
-    } catch (error) {
-      setMessage(error.message || 'Unable to check your session.')
+    )
+
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session)
+      setLoading(false)
+    })
+
+    return () => listener.subscription.unsubscribe()
+  }, [])
+
+  useEffect(() => {
+    if (session?.user) {
+      loadProfile()
+    } else {
+      setProfile(null)
+      setLoading(false)
     }
+  }, [session])
+
+  useEffect(() => {
+    if (profile) {
+      loadMemberData()
+      if (isAdmin) loadAdminData()
+    }
+  }, [profile])
+
+  useEffect(() => {
+    if (!profile) return
+    const timer = setInterval(() => {
+      loadMemberData()
+    }, 30000)
+    return () => clearInterval(timer)
+  }, [profile])
+
+  function notify(text, isError = false) {
+    setMessage(isError ? '' : text)
+    setError(isError ? text : '')
+    setTimeout(() => {
+      setMessage('')
+      setError('')
+    }, 6000)
   }
 
-  async function loadProfile(nextPage = 'member') {
-    const { data: authData, error: authError } =
-      await supabase.auth.getUser()
+  async function loadProfile() {
+    const { data, error: profileError } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('id', session.user.id)
+      .single()
 
-    if (authError) throw authError
-
-    if (!authData.user) {
-      setProfile(null)
-      setPage('home')
+    if (profileError) {
+      notify(profileError.message, true)
       return
     }
 
-    const { data, error } = await supabase
-      .from('profiles')
-      .select('*')
-      .eq('id', authData.user.id)
-      .single()
-
-    if (error) throw error
-
     setProfile(data)
-
-    const admin = Boolean(
-      data.is_admin ||
-      String(data.telegram_id) === OWNER_TELEGRAM_ID
+    setPage(
+      data.is_admin && String(data.telegram_id) === ADMIN_TELEGRAM_ID
+        ? 'admin'
+        : 'dashboard'
     )
-
-    if (admin && nextPage === 'member') {
-      setPage('admin')
-      await loadAdminData()
-    } else {
-      setPage(nextPage)
-
-      if (nextPage === 'member') {
-        await loadMemberData(data.id)
-      }
-    }
   }
 
-  async function loadMemberData(userId = profile?.id) {
-    if (!userId) return
+  async function loadMemberData() {
+    if (!session?.user) return
 
-    const [membershipResult, transactionResult, withdrawalResult] =
-      await Promise.all([
-        supabase
-          .from('memberships')
-          .select('*, plans(*)')
-          .eq('user_id', userId)
-          .order('created_at', { ascending: false })
-          .limit(1),
+    const userId = session.user.id
 
-        supabase
-          .from('transactions')
-          .select('*')
-          .eq('user_id', userId)
-          .order('created_at', { ascending: false }),
+    const [
+      membershipResult,
+      transactionResult,
+      withdrawalResult,
+      referralResult,
+      cycleResult
+    ] = await Promise.all([
+      supabase.from('memberships').select('*, plans(*)')
+        .eq('user_id', userId).order('created_at', { ascending: false }),
+      supabase.from('transactions').select('*')
+        .eq('user_id', userId).order('created_at', { ascending: false }),
+      supabase.from('withdrawals').select('*')
+        .eq('user_id', userId).order('created_at', { ascending: false }),
+      supabase.from('referrals').select('*')
+        .eq('referrer_id', userId).order('created_at', { ascending: false }),
+      supabase.from('reward_cycles').select('*')
+        .eq('user_id', userId).order('created_at', { ascending: false })
+    ])
 
-        supabase
-          .from('withdrawals')
-          .select('*')
-          .eq('user_id', userId)
-          .order('created_at', { ascending: false })
-      ])
+    if (membershipResult.error) notify(membershipResult.error.message, true)
+    else setMemberships(membershipResult.data || [])
 
-    if (membershipResult.error) throw membershipResult.error
-    if (transactionResult.error) throw transactionResult.error
-    if (withdrawalResult.error) throw withdrawalResult.error
+    if (transactionResult.error) notify(transactionResult.error.message, true)
+    else setTransactions(transactionResult.data || [])
 
-    const currentMembership = membershipResult.data?.[0] || null
+    if (withdrawalResult.error) notify(withdrawalResult.error.message, true)
+    else setWithdrawals(withdrawalResult.data || [])
 
-    setMembership(currentMembership)
-    setTransactions(transactionResult.data || [])
-    setWithdrawals(withdrawalResult.data || [])
+    if (referralResult.error) notify(referralResult.error.message, true)
+    else setReferrals(referralResult.data || [])
 
-    if (currentMembership?.status === 'active') {
-      const { data, error } = await supabase
-        .from('reward_cycles')
-        .select('*')
-        .eq('membership_id', currentMembership.id)
-        .in('status', ['running', 'claimable'])
-        .order('started_at', { ascending: false })
-        .limit(1)
-
-      if (error) throw error
-      setCycle(data?.[0] || null)
-    } else {
-      setCycle(null)
-    }
+    if (cycleResult.error) notify(cycleResult.error.message, true)
+    else setCycles(cycleResult.data || [])
   }
 
   async function loadAdminData() {
-    const [m, d, w] = await Promise.all([
-      supabase.from('profiles')
-        .select('*')
+    const [
+      depositResult,
+      withdrawalResult,
+      memberResult
+    ] = await Promise.all([
+      supabase.from('deposits').select('*, profiles(full_name,email,username), memberships(plan_id,status)')
         .order('created_at', { ascending: false }),
-
-      supabase.from('deposits')
-        .select('*')
+      supabase.from('withdrawals').select('*, profiles(full_name,email,username)')
         .order('created_at', { ascending: false }),
-
-      supabase.from('withdrawals')
-        .select('*')
+      supabase.from('profiles').select('*')
         .order('created_at', { ascending: false })
     ])
 
-    if (m.error) throw m.error
-    if (d.error) throw d.error
-    if (w.error) throw w.error
+    if (depositResult.error) notify(depositResult.error.message, true)
+    else setDeposits(depositResult.data || [])
 
-    setMembers(m.data || [])
-    setDeposits(d.data || [])
-    setWithdrawals(w.data || [])
-  }
+    if (withdrawalResult.error) notify(withdrawalResult.error.message, true)
+    else setAdminWithdrawals(withdrawalResult.data || [])
 
-  function goHome() {
-    setMessage('')
-    setPage('home')
-  }
-
-  async function openMemberDashboard() {
-    setLoading(true)
-    setMessage('')
-
-    try {
-      await loadMemberData()
-      setPage('member')
-    } catch (error) {
-      setMessage(error.message || 'Unable to load dashboard.')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  async function openAdminDashboard() {
-    setLoading(true)
-    setMessage('')
-
-    try {
-      await loadAdminData()
-      setPage('admin')
-    } catch (error) {
-      setMessage(error.message || 'Unable to load admin dashboard.')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  function updateForm(event) {
-    setForm({
-      ...form,
-      [event.target.name]: event.target.value
-    })
+    if (memberResult.error) notify(memberResult.error.message, true)
+    else setMembers(memberResult.data || [])
   }
 
   async function register(event) {
     event.preventDefault()
-    setLoading(true)
-    setMessage('')
+    setBusy(true)
 
     try {
-      const initData = window.Telegram?.WebApp?.initData
-
       if (!initData) {
-        throw new Error('Please open GOLDEN through Mubby on Telegram.')
+        throw new Error('Open GOLDEN from the Mubby Telegram bot to register.')
       }
 
-      const { data, error } =
-        await supabase.functions.invoke('create-account', {
-          body: { initData, ...form }
-        })
-
-      if (error) {
-        let details = {}
-
-        try {
-          details = await error.context.json()
-        } catch {
-          details = { error: error.message }
+      const { data, error: functionError } = await supabase.functions.invoke(
+        'create-account',
+        {
+          body: {
+            initData,
+            full_name: fullName.trim(),
+            username: username.trim(),
+            email: email.trim(),
+            password,
+            referral_code: referralCode.trim() || null
+          }
         }
+      )
 
-        throw new Error(details?.error || details?.message || error.message)
-      }
-
+      if (functionError) throw functionError
       if (data?.error) throw new Error(data.error)
 
-      const { error: loginError } =
-        await supabase.auth.signInWithPassword({
-          email: form.email,
-          password: form.password
-        })
-
-      if (loginError) throw loginError
-
-      await loadProfile('payment')
-    } catch (error) {
-      const text = error.message || 'Registration failed.'
-
-      if (
-        text.includes('409') ||
-        text.toLowerCase().includes('already exists') ||
-        text.toLowerCase().includes('already registered')
-      ) {
-        setPage('login')
-        setMessage('Your account may already exist. Please log in.')
-      } else {
-        setMessage(text)
-      }
+      notify('Account created. Please log in.')
+      setAuthMode('login')
+    } catch (err) {
+      notify(err.message || 'Registration failed.', true)
     } finally {
-      setLoading(false)
+      setBusy(false)
     }
   }
 
   async function login(event) {
     event.preventDefault()
-    setLoading(true)
-    setMessage('')
+    setBusy(true)
 
     try {
-      const { error } = await supabase.auth.signInWithPassword({
-        email,
+      const { error: loginError } = await supabase.auth.signInWithPassword({
+        email: email.trim(),
         password
       })
 
-      if (error) throw error
-
-      await loadProfile('member')
-    } catch (error) {
-      setMessage(error.message || 'Login failed.')
+      if (loginError) throw loginError
+    } catch (err) {
+      notify(err.message || 'Login failed.', true)
     } finally {
-      setLoading(false)
-    }
-  }
-
-  async function submitPayment(event) {
-    event.preventDefault()
-    setLoading(true)
-    setMessage('')
-
-    try {
-      if (transactionHash.trim().length < 20) {
-        throw new Error('Please enter a valid transaction hash.')
-      }
-
-      const { data, error } =
-        await supabase.functions.invoke('submit-deposit', {
-          body: {
-            planId: plan,
-            transactionHash: transactionHash.trim()
-          }
-        })
-
-      if (error) throw error
-      if (data?.error) throw new Error(data.error)
-
-      setPage('pending')
-      setMessage('Payment submitted for admin verification.')
-    } catch (error) {
-      setMessage(error.message || 'Payment submission failed.')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  async function copyWallet() {
-    try {
-      await navigator.clipboard.writeText(PAYMENT_WALLET)
-      setMessage('Wallet address copied.')
-    } catch {
-      setMessage('Please copy the wallet address manually.')
-    }
-  }
-
-  async function startReward() {
-    setLoading(true)
-    setMessage('')
-
-    try {
-      const { data, error } =
-        await supabase.functions.invoke('start-reward-cycle', {
-          body: {}
-        })
-
-      if (error) throw error
-      if (data?.error) throw new Error(data.error)
-
-      await loadMemberData()
-      setMessage('Your 24-hour reward countdown has started!')
-    } catch (error) {
-      setMessage(error.message || 'Unable to start reward cycle.')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  async function claimReward() {
-    setLoading(true)
-    setMessage('')
-
-    try {
-      const { data, error } =
-        await supabase.functions.invoke('claim-reward-cycle', {
-          body: {}
-        })
-
-      if (error) throw error
-      if (data?.error) throw new Error(data.error)
-
-      await loadMemberData()
-
-      setMessage(
-        `Reward claimed: $${formatMoney(data.claimed_amount)}`
-      )
-    } catch (error) {
-      setMessage(error.message || 'Unable to claim reward.')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  async function requestWithdrawal(event) {
-    event.preventDefault()
-    setLoading(true)
-    setMessage('')
-
-    try {
-      const amount = Number(withdrawAmount)
-      const wallet = withdrawWallet.trim()
-
-      if (!Number.isFinite(amount) || amount < MINIMUM_WITHDRAWAL) {
-        throw new Error(`Minimum withdrawal is $${MINIMUM_WITHDRAWAL} USDT.`)
-      }
-
-      if (!/^0x[a-fA-F0-9]{40}$/.test(wallet)) {
-        throw new Error('Enter a valid BNB Smart Chain wallet address.')
-      }
-
-      const { data, error } =
-        await supabase.functions.invoke('request-withdrawal', {
-          body: {
-            amount,
-            wallet_address: wallet
-          }
-        })
-
-      if (error) throw error
-      if (data?.error) throw new Error(data.error)
-
-      setWithdrawAmount('')
-      await loadMemberData()
-
-      setMessage('Withdrawal request submitted. Your funds are reserved.')
-    } catch (error) {
-      setMessage(error.message || 'Withdrawal request failed.')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  async function reviewWithdrawal(withdrawalId, action) {
-    let transactionHashValue = null
-
-    if (action === 'paid') {
-      transactionHashValue = window.prompt(
-        'Enter the blockchain transaction hash for this payout:'
-      )
-
-      if (!transactionHashValue || transactionHashValue.trim().length < 10) {
-        setMessage('A valid transaction hash is required.')
-        return
-      }
-    }
-
-    const confirmed = window.confirm(
-      `Are you sure you want to ${action} this withdrawal?`
-    )
-
-    if (!confirmed) return
-
-    setLoading(true)
-    setMessage('')
-
-    try {
-      const { data, error } =
-        await supabase.functions.invoke('admin-review-withdrawal', {
-          body: {
-            withdrawal_id: withdrawalId,
-            action,
-            transaction_hash: transactionHashValue
-          }
-        })
-
-      if (error) throw error
-      if (data?.error) throw new Error(data.error)
-
-      await loadAdminData()
-      setMessage(`Withdrawal ${action} completed.`)
-    } catch (error) {
-      setMessage(error.message || 'Withdrawal review failed.')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  async function reviewDeposit(depositId, action) {
-    const confirmed = window.confirm(
-      `Are you sure you want to ${action} this deposit?`
-    )
-
-    if (!confirmed) return
-
-    setLoading(true)
-    setMessage('')
-
-    try {
-      const { data, error } =
-        await supabase.functions.invoke('admin-review-deposit', {
-          body: {
-            deposit_id: depositId,
-            action
-          }
-        })
-
-      if (error) throw error
-      if (data?.error) throw new Error(data.error)
-
-      setMessage(data?.message || 'Deposit review completed.')
-      await loadAdminData()
-    } catch (error) {
-      setMessage(error.message || 'Deposit review failed.')
-    } finally {
-      setLoading(false)
+      setBusy(false)
     }
   }
 
   async function logout() {
     await supabase.auth.signOut()
-
     setProfile(null)
-    setMembership(null)
-    setCycle(null)
-    setTransactions([])
-    setWithdrawals([])
-    setMessage('You have logged out.')
+    setSession(null)
     setPage('home')
   }
 
-  const balance = transactions.reduce(
-    (total, item) => total + Number(item.amount || 0),
-    0
-  )
+  async function submitDeposit(event) {
+    event.preventDefault()
+    if (!session?.access_token) return notify('Please log in again.', true)
 
-  const claimTime = cycle
-    ? new Date(cycle.claimable_at).getTime()
-    : 0
+    setBusy(true)
 
-  const remaining = Math.max(0, claimTime - now)
-  const isClaimable = Boolean(cycle && remaining === 0)
+    try {
+      const plan = PLANS.find(item => item.id === selectedPlan)
+      if (!plan) throw new Error('Please select a valid plan.')
 
-  const completedDays = transactions.filter(
-    item => item.type === 'reward' && Number(item.amount) > 0
-  ).length
+      const { data, error: functionError } = await supabase.functions.invoke(
+        'submit-deposit',
+        {
+          body: {
+            plan_id: plan.id,
+            amount: plan.price,
+            transaction_hash: transactionHash.trim()
+          }
+        }
+      )
 
-  const isAdmin = Boolean(
-    profile?.is_admin ||
-    String(profile?.telegram_id) === OWNER_TELEGRAM_ID
-  )
+      if (functionError) throw functionError
+      if (data?.error) throw new Error(data.error)
 
-  if (!telegramChecked) {
+      setTransactionHash('')
+      notify('Payment submission received. Waiting for admin approval.')
+      await loadMemberData()
+      setPage('dashboard')
+    } catch (err) {
+      notify(err.message || 'Could not submit payment.', true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function startReward() {
+    setBusy(true)
+
+    try {
+      const { data, error: functionError } = await supabase.functions.invoke(
+        'start-reward-cycle',
+        { body: {} }
+      )
+
+      if (functionError) throw functionError
+      if (data?.error) throw new Error(data.error)
+
+      notify(data?.message || 'Your 24-hour reward cycle has started.')
+      await loadMemberData()
+    } catch (err) {
+      notify(err.message || 'Could not start reward cycle.', true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function claimReward() {
+    setBusy(true)
+
+    try {
+      const { data, error: functionError } = await supabase.functions.invoke(
+        'claim-reward-cycle',
+        { body: {} }
+      )
+
+      if (functionError) throw functionError
+      if (data?.error) throw new Error(data.error)
+
+      notify(data?.message || 'Reward claimed successfully.')
+      await loadMemberData()
+    } catch (err) {
+      notify(err.message || 'Could not claim reward.', true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function requestWithdrawal(event) {
+    event.preventDefault()
+    const amount = Number(withdrawAmount)
+
+    if (!Number.isFinite(amount) || amount < MINIMUM_WITHDRAWAL) {
+      return notify(`Minimum withdrawal is ${money(MINIMUM_WITHDRAWAL)}.`, true)
+    }
+
+    if (!/^0x[a-fA-F0-9]{40}$/.test(withdrawWallet.trim())) {
+      return notify('Enter a valid BEP20 wallet address.', true)
+    }
+
+    if (amount > balance) return notify('Insufficient available balance.', true)
+
+    setBusy(true)
+
+    try {
+      const { data, error: functionError } = await supabase.functions.invoke(
+        'request-withdrawal',
+        {
+          body: {
+            amount,
+            wallet_address: withdrawWallet.trim()
+          }
+        }
+      )
+
+      if (functionError) throw functionError
+      if (data?.error) throw new Error(data.error)
+
+      setWithdrawAmount('')
+      setWithdrawWallet('')
+      notify('Withdrawal request submitted.')
+      await loadMemberData()
+    } catch (err) {
+      notify(err.message || 'Withdrawal request failed.', true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function reviewDeposit(id, action) {
+    if (!window.confirm(`Are you sure you want to ${action} this deposit?`)) return
+
+    setBusy(true)
+
+    try {
+      const { data, error: functionError } = await supabase.functions.invoke(
+        'admin-review-deposit',
+        { body: { deposit_id: id, action } }
+      )
+
+      if (functionError) throw functionError
+      if (data?.error) throw new Error(data.error)
+
+      notify(`Deposit ${action}d successfully.`)
+      await loadAdminData()
+    } catch (err) {
+      notify(err.message || 'Could not review deposit.', true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function reviewWithdrawal(id, action) {
+    let transaction_hash = null
+
+    if (action === 'paid') {
+      transaction_hash = window.prompt('Enter the transaction hash:')
+      if (!transaction_hash || transaction_hash.trim().length < 10) {
+        return notify('A valid transaction hash is required.', true)
+      }
+    }
+
+    if (!window.confirm(`Confirm withdrawal ${action}?`)) return
+
+    setBusy(true)
+
+    try {
+      const { data, error: functionError } = await supabase.functions.invoke(
+        'admin-review-withdrawal',
+        {
+          body: {
+            withdrawal_id: id,
+            action,
+            transaction_hash
+          }
+        }
+      )
+
+      if (functionError) throw functionError
+      if (data?.error) throw new Error(data.error)
+
+      notify(`Withdrawal ${action} successfully.`)
+      await loadAdminData()
+    } catch (err) {
+      notify(err.message || 'Could not review withdrawal.', true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function copyReferral() {
+    const link = `https://t.me/Mrmubby_bot?start=${profile?.referral_code || ''}`
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(link)
+        .then(() => notify('Referral link copied.'))
+        .catch(() => notify(link))
+    } else {
+      notify(link)
+    }
+  }
+
+  const activeMembership = memberships.find(item => item.status === 'active')
+  const currentCycle = cycles.find(item => item.status === 'running')
+
+  function timeRemaining(date) {
+    const difference = new Date(date).getTime() - Date.now()
+    if (difference <= 0) return 'Ready to claim'
+
+    const hours = Math.floor(difference / 3600000)
+    const minutes = Math.floor((difference % 3600000) / 60000)
+    const seconds = Math.floor((difference % 60000) / 1000)
+
+    return `${hours}h ${minutes}m ${seconds}s`
+  }
+
+  const [clock, setClock] = useState(Date.now())
+
+  useEffect(() => {
+    const timer = setInterval(() => setClock(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [])
+
+  const styles = `
+    * { box-sizing:border-box }
+    body { margin:0;background:#080808;color:#f7f0dc;font-family:Arial,sans-serif }
+    .golden { min-height:100vh;background:radial-gradient(circle at top,#211a08 0,#080808 45%);padding:20px 14px 50px }
+    .wrap { max-width:1050px;margin:auto }
+    .header { display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #3a2c0c;padding:10px 0 20px;gap:12px }
+    .brand { font-size:26px;font-weight:900;letter-spacing:4px;color:#e7bd55 }
+    .sub { color:#a99b7a;font-size:12px;margin-top:4px }
+    .nav { display:flex;flex-wrap:wrap;gap:8px }
+    button,.btn { background:linear-gradient(135deg,#f0ce73,#b78324);color:#171107;border:0;border-radius:10px;padding:12px 16px;font-weight:800;cursor:pointer }
+    button:disabled { opacity:.45;cursor:not-allowed }
+    .secondary { background:#17140d;color:#e9c66e;border:1px solid #70551e }
+    .danger { background:#501c18;color:#ffd2c8;border:1px solid #a34438 }
+    .card { background:linear-gradient(145deg,#17140e,#0d0d0c);border:1px solid #493719;border-radius:16px;padding:20px;margin:15px 0;box-shadow:0 8px 30px #0005 }
+    .hero { padding:45px 25px;text-align:center;border:1px solid #70551e;border-radius:20px;background:linear-gradient(140deg,#1d180c,#0b0b0b) }
+    h1,h2,h3 { color:#f0ce73;margin-top:0 }
+    p,.muted { color:#b8ad91;line-height:1.55 }
+    .grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px }
+    .price { font-size:32px;color:#f0ce73;font-weight:900;margin:12px 0 }
+    input,select { width:100%;padding:14px;margin:7px 0 14px;background:#090909;color:#fff;border:1px solid #59451e;border-radius:9px;font-size:15px }
+    label { color:#d7c99f;font-size:13px }
+    .row { display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap }
+    .stat { font-size:26px;color:#f0ce73;font-weight:900 }
+    .pill { display:inline-block;padding:5px 10px;border-radius:30px;background:#33270e;color:#eac96e;font-size:12px }
+    .notice { padding:12px;border-radius:10px;background:#142519;border:1px solid #326b43;color:#a8e7b6;margin:12px 0 }
+    .error { padding:12px;border-radius:10px;background:#321713;border:1px solid #874137;color:#ffc1b5;margin:12px 0 }
+    .table { width:100%;border-collapse:collapse;font-size:13px }
+    .table td,.table th { padding:10px 7px;border-bottom:1px solid #332b1c;text-align:left;vertical-align:top }
+    .table th { color:#e7bd55 }
+    .actions { display:flex;gap:7px;flex-wrap:wrap }
+    .small { font-size:12px;color:#a99b7a }
+    .center { text-align:center }
+    .bigicon { color:#e7bd55;width:30px;height:30px }
+    .mobilemenu { display:none }
+    a { color:#f0ce73 }
+    @media(max-width:650px) {
+      .header { align-items:flex-start }
+      .nav { display:none }
+      .mobilemenu { display:block }
+      .nav.open { display:flex;position:absolute;right:15px;top:75px;z-index:10;background:#17140e;padding:12px;border:1px solid #70551e;border-radius:12px;flex-direction:column }
+      .table { min-width:600px }
+      .tablewrap { overflow-x:auto }
+    }
+  `
+
+  function navButton(label, destination, Icon) {
     return (
-      <main className="app">
-        <section className="hero">
-          <h1>GOLDEN</h1>
-          <p>Loading...</p>
-        </section>
-      </main>
+      <button className="secondary" onClick={() => { setPage(destination); setMenuOpen(false) }}>
+        {Icon && <Icon size={15} style={{ verticalAlign: 'middle', marginRight: 5 }} />}
+        {label}
+      </button>
     )
   }
 
-  if (!insideTelegram) {
-    return (
-      <main className="app">
-        <header className="topbar">
-          <div className="brand">GOLDEN</div>
-          <span className="badge">MEMBERSHIP</span>
-        </header>
-
-        <section className="hero">
-          <h1>Welcome to GOLDEN</h1>
-          <p>Please open GOLDEN through the Mubby Telegram bot.</p>
-          <a href="https://t.me/Mrmubby_bot" className="primary">
-            Open Mubby on Telegram
-          </a>
-        </section>
-
-        <footer>GOLDEN • Powered by Mubby</footer>
-      </main>
-    )
+  if (loading) {
+    return <div className="golden center"><h2>GOLDEN</h2><p>Loading your account...</p></div>
   }
 
   return (
-    <main className="app">
-      <header className="topbar">
-        <button className="brand brand-button" onClick={goHome}>
-          GOLDEN
-        </button>
-        <span className="badge">MEMBERSHIP</span>
-      </header>
+    <>
+      <style>{styles}</style>
+      <div className="golden">
+        <div className="wrap">
+          <header className="header">
+            <div>
+              <div className="brand">GOLDEN</div>
+              <div className="sub">Your rewards dashboard</div>
+            </div>
 
-      {page === 'home' && (
-        <>
-          <section className="hero">
-            <div className="crown">♛</div>
-            <div className="eyebrow">WELCOME TO</div>
-            <h1>GOLDEN</h1>
-            <p>Choose your membership plan to get started.</p>
-          </section>
+            <button className="secondary mobilemenu" onClick={() => setMenuOpen(!menuOpen)}>
+              {menuOpen ? <X /> : <Menu />}
+            </button>
 
-          <section className="plans">
-            {Object.entries(plans).map(([id, item]) => (
-              <button
-                type="button"
-                className={`plan ${plan === id ? 'selected' : ''}`}
-                key={id}
-                onClick={() => setPlan(id)}
-              >
-                <span className="plan-name">{item.name}</span>
-                <span className="price">${item.price}</span>
-                <span className="daily">${item.daily} daily reward</span>
-                <span className="duration">{item.days} days</span>
-              </button>
-            ))}
-          </section>
+            <nav className={`nav ${menuOpen ? 'open' : ''}`}>
+              {navButton('Home', 'home', Home)}
+              {session && navButton('Dashboard', 'dashboard', User)}
+              {session && navButton('Plans', 'plans', Crown)}
+              {session && navButton('Referrals', 'referrals', Users)}
+              {session && navButton('Withdraw', 'withdraw', Wallet)}
+              {isAdmin && navButton('Admin', 'admin', ShieldCheck)}
+              {session && <button className="danger" onClick={logout}><LogOut size={15} /> Logout</button>}
+            </nav>
+          </header>
 
-          {profile ? (
-            <section className="home-account">
-              <p>Welcome back, {profile.full_name}.</p>
+          {(message || error) && (
+            <div className={error ? 'error' : 'notice'}>{error || message}</div>
+          )}
 
-              {isAdmin ? (
-                <button
-                  className="primary"
-                  onClick={openAdminDashboard}
-                  disabled={loading}
-                >
-                  {loading ? 'Loading...' : 'OPEN ADMIN DASHBOARD'}
-                </button>
-              ) : (
-                <button
-                  className="primary"
-                  onClick={openMemberDashboard}
-                  disabled={loading}
-                >
-                  {loading ? 'Loading...' : 'MY MEMBER DASHBOARD'}
-                </button>
-              )}
-
-              <button className="back" onClick={logout}>Logout</button>
-            </section>
-          ) : (
+          {page === 'home' && (
             <>
-              <button className="primary" onClick={() => setPage('register')}>
-                Create account
-              </button>
+              <section className="hero" style={{ marginTop: 22 }}>
+                <Crown className="bigicon" />
+                <h1 style={{ fontSize: 38, letterSpacing: 2 }}>WELCOME TO GOLDEN</h1>
+                <p>Manage your membership, rewards, referrals and withdrawals in one place.</p>
+                {!session ? (
+                  <div className="actions" style={{ justifyContent: 'center' }}>
+                    <button onClick={() => { setAuthMode('register'); setPage('auth') }}>Create account</button>
+                    <button className="secondary" onClick={() => { setAuthMode('login'); setPage('auth') }}>Login</button>
+                  </div>
+                ) : (
+                  <button onClick={() => setPage(isAdmin ? 'admin' : 'dashboard')}>Open dashboard</button>
+                )}
+              </section>
 
-              <button className="back" onClick={() => setPage('login')}>
-                Already registered? Login
-              </button>
+              <h2 style={{ marginTop: 30 }}>Membership plans</h2>
+              <div className="grid">
+                {PLANS.map(plan => (
+                  <div className="card" key={plan.id}>
+                    <h2>{plan.name}</h2>
+                    <div className="price">{money(plan.price)}</div>
+                    <p>Advertised daily reward: {money(plan.reward)}</p>
+                    <p>Membership period: {plan.days} days</p>
+                    <button onClick={() => {
+                      setSelectedPlan(plan.id)
+                      setPage(session ? 'payment' : 'auth')
+                      if (!session) setAuthMode('register')
+                    }}>Choose plan</button>
+                  </div>
+                ))}
+              </div>
+              <p className="small">Rewards are subject to membership terms, available funding and approval. No investment return is guaranteed.</p>
             </>
           )}
-        </>
-      )}
 
-      {page === 'register' && (
-        <section className="registration">
-          <button className="back" onClick={goHome}>← BACK TO HOME</button>
-          <h2>Create your GOLDEN account</h2>
+          {page === 'auth' && (
+            <div className="card" style={{ maxWidth: 520, margin: '30px auto' }}>
+              <h2>{authMode === 'register' ? 'Create your account' : 'Welcome back'}</h2>
+              {!initData && <div className="error">Open this app through the Mubby Telegram bot to register with your Telegram account.</div>}
 
-          <form onSubmit={register}>
-            <input name="fullName" placeholder="Full name" value={form.fullName} onChange={updateForm} required />
-            <input name="username" placeholder="Username" value={form.username} onChange={updateForm} required />
-            <input name="email" type="email" placeholder="Email address" value={form.email} onChange={updateForm} required />
-            <input name="password" type="password" placeholder="Password (minimum 10 characters)" value={form.password} onChange={updateForm} minLength={10} required />
-            <input name="referralCode" placeholder="Referral code (optional)" value={form.referralCode} onChange={updateForm} />
-
-            <button className="primary" disabled={loading}>
-              {loading ? 'Creating account...' : 'Create account'}
-            </button>
-          </form>
-
-          <button className="back" onClick={() => setPage('login')}>
-            Already registered? Login
-          </button>
-        </section>
-      )}
-
-      {page === 'login' && (
-        <section className="registration">
-          <button className="back" onClick={goHome}>← BACK TO HOME</button>
-          <h2>Login to GOLDEN</h2>
-
-          <form onSubmit={login}>
-            <input type="email" placeholder="Email address" value={email} onChange={e => setEmail(e.target.value)} required />
-            <input type="password" placeholder="Password" value={password} onChange={e => setPassword(e.target.value)} required />
-
-            <button className="primary" disabled={loading}>
-              {loading ? 'Logging in...' : 'Login'}
-            </button>
-          </form>
-        </section>
-      )}
-
-      {page === 'payment' && (
-        <section className="registration">
-          <button className="back" onClick={goHome}>← BACK TO HOME</button>
-          <h2>Complete your payment</h2>
-          <p>Plan: {selectedPlan.name}</p>
-          <h2>${selectedPlan.price} USDT</h2>
-          <p>Network: USDT BEP20 (BNB Smart Chain)</p>
-          <p>Send the exact amount to this wallet:</p>
-          <p className="wallet-address">{PAYMENT_WALLET}</p>
-
-          <button className="primary" type="button" onClick={copyWallet}>
-            Copy wallet address
-          </button>
-
-          <form onSubmit={submitPayment}>
-            <input value={transactionHash} onChange={e => setTransactionHash(e.target.value)} placeholder="Paste transaction hash" required />
-            <button className="primary" disabled={loading}>
-              {loading ? 'Submitting...' : 'Submit payment'}
-            </button>
-          </form>
-        </section>
-      )}
-
-      {page === 'pending' && (
-        <section className="hero">
-          <button className="back" onClick={goHome}>← BACK TO HOME</button>
-          <h2>Payment submitted</h2>
-          <p>Your payment is awaiting admin verification.</p>
-
-          <button className="primary" onClick={() => loadProfile('member')} disabled={loading}>
-            Refresh membership status
-          </button>
-        </section>
-      )}
-
-      {page === 'member' && (
-        <section className="member-dashboard">
-          <button className="back" onClick={goHome}>← BACK TO HOME</button>
-
-          <div className="member-heading">
-            <span className="eyebrow">YOUR GOLDEN ACCOUNT</span>
-            <h2>Welcome, {profile?.full_name || 'Member'}</h2>
-          </div>
-
-          <div className="reward-card balance-card">
-            <div className="eyebrow">AVAILABLE BALANCE</div>
-            <div className="reward-amount">${formatMoney(balance)}</div>
-            <p className="muted">USDT • BNB Smart Chain withdrawals</p>
-          </div>
-
-          {!membership && (
-            <div className="notice">
-              <strong>No membership found</strong>
-              <p>Choose a plan to get started.</p>
-              <button className="primary" onClick={goHome}>View membership plans</button>
-            </div>
-          )}
-
-          {membership?.status === 'pending' && (
-            <div className="notice">
-              <strong>Payment awaiting approval</strong>
-              <p>Your membership will activate after admin verification.</p>
-              <button className="primary" onClick={() => loadMemberData()} disabled={loading}>
-                Refresh status
-              </button>
-            </div>
-          )}
-
-          {membership?.status === 'rejected' && (
-            <div className="notice">
-              <strong>Membership not approved</strong>
-              <p>Please contact GOLDEN support before submitting another payment.</p>
-            </div>
-          )}
-
-          {membership?.status === 'completed' && (
-            <div className="notice">
-              <strong>Reward plan completed</strong>
-              <p>You have completed your membership reward cycles.</p>
-            </div>
-          )}
-
-          {membership?.status === 'active' && (
-            <>
-              <div className="reward-card">
-                <div className="eyebrow">YOUR DAILY REWARD</div>
-                <div className="coin-stage"><div className="gold-coin">G</div></div>
-                <div className="reward-amount">
-                  ${formatMoney(membership.plans?.daily_reward)}
-                </div>
-                <p className="muted">USDT reward per completed cycle</p>
-
-                {cycle ? (
+              <form onSubmit={authMode === 'register' ? register : login}>
+                {authMode === 'register' && (
                   <>
-                    <div className="timer-label">
-                      {isClaimable ? 'YOUR REWARD IS READY' : 'NEXT CLAIM IN'}
-                    </div>
-                    <div className="countdown">
-                      {isClaimable ? '00:00:00' : formatTime(remaining)}
-                    </div>
+                    <label>Full name</label>
+                    <input required value={fullName} onChange={e => setFullName(e.target.value)} />
+                    <label>Username</label>
+                    <input required value={username} onChange={e => setUsername(e.target.value)} />
+                  </>
+                )}
 
-                    {isClaimable ? (
-                      <button className="primary claim-button" disabled={loading} onClick={claimReward}>
-                        {loading ? 'Claiming...' : 'CLAIM REWARD'}
-                      </button>
-                    ) : (
-                      <button className="primary" disabled>REWARD COUNTDOWN RUNNING</button>
-                    )}
+                <label>Email</label>
+                <input type="email" required value={email} onChange={e => setEmail(e.target.value)} />
+
+                <label>Password</label>
+                <input type="password" required minLength="6" value={password} onChange={e => setPassword(e.target.value)} />
+
+                {authMode === 'register' && (
+                  <>
+                    <label>Referral code (optional)</label>
+                    <input value={referralCode} onChange={e => setReferralCode(e.target.value)} />
+                  </>
+                )}
+
+                <button disabled={busy} style={{ width: '100%' }}>
+                  {busy ? 'Please wait...' : authMode === 'register' ? 'Create account' : 'Login'}
+                </button>
+              </form>
+
+              <p className="center">
+                {authMode === 'register' ? 'Already registered?' : 'New to GOLDEN?'}
+                {' '}
+                <a href="#" onClick={e => {
+                  e.preventDefault()
+                  setAuthMode(authMode === 'register' ? 'login' : 'register')
+                }}>{authMode === 'register' ? 'Login' : 'Create account'}</a>
+              </p>
+            </div>
+          )}
+
+          {page === 'plans' && (
+            <>
+              <h1>Choose your membership</h1>
+              <div className="grid">
+                {PLANS.map(plan => (
+                  <div className="card" key={plan.id}>
+                    <h2>{plan.name}</h2>
+                    <div className="price">{money(plan.price)}</div>
+                    <p>Daily reward amount: {money(plan.reward)}</p>
+                    <p>Duration: {plan.days} days</p>
+                    <button onClick={() => { setSelectedPlan(plan.id); setPage('payment') }}>Continue</button>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+
+          {page === 'payment' && (
+            <div className="card" style={{ maxWidth: 650, margin: '25px auto' }}>
+              <h2><CreditCard className="bigicon" /> Payment submission</h2>
+              <p>Select a plan and send the exact amount using the BEP20 network.</p>
+
+              <label>Membership plan</label>
+              <select value={selectedPlan} onChange={e => setSelectedPlan(e.target.value)}>
+                {PLANS.map(plan => <option value={plan.id} key={plan.id}>{plan.name} — {money(plan.price)}</option>)}
+              </select>
+
+              <div className="card">
+                <p>Network</p>
+                <h3>{NETWORK}</h3>
+                <p>Payment wallet</p>
+                <strong style={{ overflowWrap: 'anywhere' }}>{PAYMENT_WALLET}</strong>
+                <p className="small">Send only USDT on BNB Smart Chain (BEP20). Sending another token or network may result in loss of funds.</p>
+              </div>
+
+              <form onSubmit={submitDeposit}>
+                <label>Transaction hash</label>
+                <input required value={transactionHash} onChange={e => setTransactionHash(e.target.value)} placeholder="Enter your transaction hash" />
+                <button disabled={busy} style={{ width: '100%' }}>Submit payment for review</button>
+              </form>
+            </div>
+          )}
+
+          {page === 'dashboard' && (
+            <>
+              <div className="row" style={{ marginTop: 25 }}>
+                <div>
+                  <h1>Welcome, {profile?.full_name || 'Member'}</h1>
+                  <p>Your GOLDEN member dashboard</p>
+                </div>
+                <span className="pill">{profile?.username}</span>
+              </div>
+
+              <div className="grid">
+                <div className="card"><Wallet className="bigicon" /><p>Available balance</p><div className="stat">{money(balance)}</div></div>
+                <div className="card"><Crown className="bigicon" /><p>Membership</p><div className="stat" style={{ fontSize: 20 }}>{activeMembership?.plan_id || 'No active plan'}</div></div>
+                <div className="card"><Users className="bigicon" /><p>Successful referrals</p><div className="stat">{referrals.filter(item => item.status === 'credited').length}</div></div>
+              </div>
+
+              <div className="card">
+                <h2>Reward centre</h2>
+                {!activeMembership ? (
+                  <>
+                    <p>You do not currently have an active membership.</p>
+                    <button onClick={() => setPage('plans')}>View plans</button>
                   </>
                 ) : (
                   <>
-                    <div className="timer-label">READY FOR YOUR NEXT CYCLE?</div>
-                    <button className="primary start-button" disabled={loading} onClick={startReward}>
-                      {loading ? 'Starting...' : 'START'}
-                    </button>
+                    <p>Active plan: <strong>{activeMembership.plan_id}</strong></p>
+                    <p>Membership expires: {activeMembership.expires_at ? new Date(activeMembership.expires_at).toLocaleString() : 'Not set'}</p>
+                    {currentCycle ? (
+                      <>
+                        <p>Reward amount: <strong>{money(currentCycle.amount)}</strong></p>
+                        <div className="stat" style={{ fontSize: 23 }}>
+                          {new Date(currentCycle.claimable_at).getTime() <= clock
+                            ? 'Reward ready'
+                            : timeRemaining(currentCycle.claimable_at)}
+                        </div>
+                        <button disabled={busy || new Date(currentCycle.claimable_at).getTime() > clock} onClick={claimReward}>
+                          Claim reward
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <p>Start a 24-hour reward cycle when you are ready.</p>
+                        <button disabled={busy} onClick={startReward}>Start reward cycle</button>
+                      </>
+                    )}
                   </>
                 )}
               </div>
 
-              <div className="progress-card">
-                <h3>REWARD PROGRESS</h3>
-                <p>Completed cycles: {completedDays} / {membership.plans?.duration_days || 0}</p>
-                <div className="progress-track">
-                  <div
-                    className="progress-fill"
-                    style={{
-                      width: `${Math.min(100, (completedDays / (membership.plans?.duration_days || 1)) * 100)}%`
-                    }}
-                  />
+              <div className="card">
+                <h2>Recent activity</h2>
+                <div className="tablewrap">
+                  <table className="table">
+                    <thead><tr><th>Type</th><th>Amount</th><th>Description</th><th>Date</th></tr></thead>
+                    <tbody>
+                      {transactions.slice(0, 15).map(item => (
+                        <tr key={item.id}>
+                          <td>{item.type}</td>
+                          <td>{money(item.amount)}</td>
+                          <td>{item.description || '—'}</td>
+                          <td>{new Date(item.created_at).toLocaleDateString()}</td>
+                        </tr>
+                      ))}
+                      {!transactions.length && <tr><td colSpan="4">No transactions yet.</td></tr>}
+                    </tbody>
+                  </table>
                 </div>
-                <p>
-                  Membership expires: {
-                    membership.expires_at
-                      ? new Date(membership.expires_at).toLocaleDateString()
-                      : 'Not set'
-                  }
-                </p>
               </div>
             </>
           )}
 
-          <div className="progress-card">
-            <h3>WITHDRAW USDT</h3>
-            <p>Minimum withdrawal: ${MINIMUM_WITHDRAWAL.toFixed(2)} USDT</p>
-            <p className="muted">Maximum one request per day. Network: USDT BEP20.</p>
-
-            <form onSubmit={requestWithdrawal}>
-              <input
-                type="number"
-                min={MINIMUM_WITHDRAWAL}
-                step="0.01"
-                placeholder="Amount in USDT"
-                value={withdrawAmount}
-                onChange={e => setWithdrawAmount(e.target.value)}
-                required
-              />
-
-              <input
-                type="text"
-                placeholder="Your 0x BNB Smart Chain wallet address"
-                value={withdrawWallet}
-                onChange={e => setWithdrawWallet(e.target.value)}
-                required
-              />
-
-              <button className="primary" disabled={loading || balance < MINIMUM_WITHDRAWAL}>
-                {loading ? 'Submitting...' : 'REQUEST WITHDRAWAL'}
-              </button>
-            </form>
-
-            {balance < MINIMUM_WITHDRAWAL && (
-              <p className="muted">Your available balance must reach $10 before you can withdraw.</p>
-            )}
-          </div>
-
-          <div className="progress-card">
-            <h3>WITHDRAWAL HISTORY</h3>
-
-            {withdrawals.length === 0 && <p className="muted">No withdrawal requests yet.</p>}
-
-            {withdrawals.map(item => (
-              <div className="history-row" key={item.id}>
-                <div>
-                  <strong>${formatMoney(item.amount)} USDT</strong>
-                  <p className="small-text">{new Date(item.created_at).toLocaleString()}</p>
-                  <p className="small-text">Status: {item.status}</p>
-                  {item.transaction_hash && <p className="small-text">Tx: {item.transaction_hash}</p>}
+          {page === 'referrals' && (
+            <>
+              <h1>Referral centre</h1>
+              <div className="card">
+                <Gift className="bigicon" />
+                <h2>Earn {money(REFERRAL_BONUS)} per successful referral</h2>
+                <p>Your referral bonus is credited only after the referred member's payment is approved.</p>
+                <p>Your referral code</p>
+                <h2>{profile?.referral_code}</h2>
+                <button onClick={copyReferral}><Copy size={15} /> Copy referral link</button>
+              </div>
+              <div className="card">
+                <h2>Your referrals</h2>
+                <div className="tablewrap">
+                  <table className="table">
+                    <thead><tr><th>Joined</th><th>Bonus</th><th>Status</th></tr></thead>
+                    <tbody>
+                      {referrals.map(item => (
+                        <tr key={item.id}>
+                          <td>{new Date(item.created_at).toLocaleDateString()}</td>
+                          <td>{money(item.bonus_amount)}</td>
+                          <td>{item.status}</td>
+                        </tr>
+                      ))}
+                      {!referrals.length && <tr><td colSpan="3">No referrals yet.</td></tr>}
+                    </tbody>
+                  </table>
                 </div>
               </div>
-            ))}
-          </div>
+            </>
+          )}
 
-          <div className="progress-card">
-            <h3>TRANSACTION HISTORY</h3>
-
-            {transactions.length === 0 && <p className="muted">No transactions yet.</p>}
-
-            {transactions.map(item => (
-              <div className="history-row" key={item.id}>
-                <span>
-                  {item.description || item.type}
-                  <small>{new Date(item.created_at).toLocaleDateString()}</small>
-                </span>
-                <strong className={Number(item.amount) < 0 ? 'negative-amount' : ''}>
-                  {Number(item.amount) >= 0 ? '+' : ''}${formatMoney(item.amount)}
-                </strong>
+          {page === 'withdraw' && (
+            <>
+              <h1>Withdraw funds</h1>
+              <div className="grid">
+                <div className="card">
+                  <Wallet className="bigicon" />
+                  <p>Available balance</p>
+                  <div className="stat">{money(balance)}</div>
+                  <p className="small">Minimum withdrawal: {money(MINIMUM_WITHDRAWAL)}</p>
+                </div>
+                <div className="card">
+                  <h2>Withdrawal request</h2>
+                  <form onSubmit={requestWithdrawal}>
+                    <label>Amount (USDT)</label>
+                    <input type="number" min="10" step="0.01" required value={withdrawAmount} onChange={e => setWithdrawAmount(e.target.value)} />
+                    <label>BEP20 wallet address</label>
+                    <input required value={withdrawWallet} onChange={e => setWithdrawWallet(e.target.value)} placeholder="0x..." />
+                    <p className="small">One request per day. Network: {NETWORK}.</p>
+                    <button disabled={busy || balance < MINIMUM_WITHDRAWAL}>Submit withdrawal</button>
+                  </form>
+                </div>
               </div>
-            ))}
-          </div>
 
-          <button className="back" onClick={() => loadMemberData()} disabled={loading}>
-            Refresh dashboard
-          </button>
-
-          <button className="back" onClick={logout}>Logout</button>
-        </section>
-      )}
-
-      {page === 'admin' && (
-        <section className="registration">
-          <button className="back" onClick={goHome}>← BACK TO HOME</button>
-
-          <h2>GOLDEN Admin Dashboard</h2>
-          <p>Welcome, {profile?.full_name || 'Admin'}</p>
-
-          <div className="admin-stats">
-            <div>Total members: <strong>{members.length}</strong></div>
-            <div>Payment submissions: <strong>{deposits.length}</strong></div>
-            <div>Withdrawal requests: <strong>{withdrawals.length}</strong></div>
-          </div>
-
-          <h3>Recent members</h3>
-          {members.slice(0, 10).map(member => (
-            <p key={member.id}>{member.full_name} — {member.email}</p>
-          ))}
-
-          <h3>Deposit submissions</h3>
-          {deposits.length === 0 && <p>No deposits submitted.</p>}
-
-          {deposits.slice(0, 20).map(deposit => (
-            <div className="admin-item" key={deposit.id}>
-              <strong>{formatMoney(deposit.amount)} USDT</strong>
-              <p>Status: {deposit.status}</p>
-              <p>Transaction: {deposit.transaction_hash || 'Not supplied'}</p>
-              <p className="small-text">Deposit ID: {deposit.id}</p>
-
-              {deposit.status === 'pending' && (
-                <div className="admin-actions">
-                  <button className="primary" disabled={loading} onClick={() => reviewDeposit(deposit.id, 'approve')}>Approve</button>
-                  <button className="danger" disabled={loading} onClick={() => reviewDeposit(deposit.id, 'reject')}>Reject</button>
+              <div className="card">
+                <h2>Withdrawal history</h2>
+                <div className="tablewrap">
+                  <table className="table">
+                    <thead><tr><th>Amount</th><th>Wallet</th><th>Status</th><th>Date</th><th>Hash</th></tr></thead>
+                    <tbody>
+                      {withdrawals.map(item => (
+                        <tr key={item.id}>
+                          <td>{money(item.amount)}</td>
+                          <td style={{ overflowWrap: 'anywhere' }}>{item.wallet_address}</td>
+                          <td>{item.status}</td>
+                          <td>{new Date(item.created_at).toLocaleDateString()}</td>
+                          <td>{item.transaction_hash || '—'}</td>
+                        </tr>
+                      ))}
+                      {!withdrawals.length && <tr><td colSpan="5">No withdrawal requests yet.</td></tr>}
+                    </tbody>
+                  </table>
                 </div>
-              )}
-            </div>
-          ))}
+              </div>
+            </>
+          )}
 
-          <h3>Withdrawal requests</h3>
-          {withdrawals.length === 0 && <p>No withdrawals submitted.</p>}
-
-          {withdrawals.map(item => (
-            <div className="admin-item" key={item.id}>
-              <strong>{formatMoney(item.amount)} USDT</strong>
-              <p>Status: {item.status}</p>
-              <p>Wallet: {item.wallet_address}</p>
-              <p>Network: {item.network}</p>
-              <p className="small-text">Request ID: {item.id}</p>
-
-              {item.transaction_hash && (
-                <p className="small-text">Transaction hash: {item.transaction_hash}</p>
-              )}
-
-              {item.status === 'pending' && (
-                <div className="admin-actions">
-                  <button className="primary" disabled={loading} onClick={() => reviewWithdrawal(item.id, 'approve')}>
-                    Approve
-                  </button>
-                  <button className="danger" disabled={loading} onClick={() => reviewWithdrawal(item.id, 'reject')}>
-                    Reject
-                  </button>
+          {page === 'admin' && (
+            isAdmin ? (
+              <>
+                <div className="row" style={{ marginTop: 25 }}>
+                  <div><h1>GOLDEN Admin</h1><p>Administration and payment management</p></div>
+                  <span className="pill"><ShieldCheck size={13} /> ADMIN</span>
                 </div>
-              )}
 
-              {item.status === 'approved' && (
-                <div className="admin-actions">
-                  <button className="primary" disabled={loading} onClick={() => reviewWithdrawal(item.id, 'paid')}>
-                    Mark as paid
-                  </button>
-                  <button className="danger" disabled={loading} onClick={() => reviewWithdrawal(item.id, 'reject')}>
-                    Reject and refund
-                  </button>
+                <div className="grid">
+                  <div className="card"><Users className="bigicon" /><p>Total members</p><div className="stat">{members.length}</div></div>
+                  <div className="card"><CreditCard className="bigicon" /><p>Pending deposits</p><div className="stat">{deposits.filter(item => item.status === 'pending').length}</div></div>
+                  <div className="card"><Wallet className="bigicon" /><p>Pending withdrawals</p><div className="stat">{adminWithdrawals.filter(item => item.status === 'pending').length}</div></div>
                 </div>
-              )}
-            </div>
-          ))}
 
-          <button className="back" onClick={loadAdminData} disabled={loading}>
-            Refresh admin dashboard
-          </button>
+                <div className="card">
+                  <div className="row"><h2>Deposit submissions</h2><button className="secondary" onClick={loadAdminData}><RefreshCw size={14} /> Refresh</button></div>
+                  <div className="tablewrap">
+                    <table className="table">
+                      <thead><tr><th>Member</th><th>Amount</th><th>Plan</th><th>Hash</th><th>Status</th><th>Actions</th></tr></thead>
+                      <tbody>
+                        {deposits.map(item => (
+                          <tr key={item.id}>
+                            <td>{item.profiles?.full_name || item.user_id}</td>
+                            <td>{money(item.amount)}</td>
+                            <td>{item.memberships?.plan_id || '—'}</td>
+                            <td style={{ overflowWrap: 'anywhere' }}>{item.transaction_hash || '—'}</td>
+                            <td>{item.status}</td>
+                            <td>
+                              {item.status === 'pending' && (
+                                <div className="actions">
+                                  <button disabled={busy} onClick={() => reviewDeposit(item.id, 'approve')}>Approve</button>
+                                  <button className="danger" disabled={busy} onClick={() => reviewDeposit(item.id, 'reject')}>Reject</button>
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                        {!deposits.length && <tr><td colSpan="6">No deposits found.</td></tr>}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
 
-          <button className="back" onClick={logout}>Logout</button>
-        </section>
-      )}
+                <div className="card">
+                  <div className="row"><h2>Withdrawal requests</h2><button className="secondary" onClick={loadAdminData}><RefreshCw size={14} /> Refresh</button></div>
+                  <div className="tablewrap">
+                    <table className="table">
+                      <thead><tr><th>Member</th><th>Amount</th><th>Wallet</th><th>Status</th><th>Actions</th></tr></thead>
+                      <tbody>
+                        {adminWithdrawals.map(item => (
+                          <tr key={item.id}>
+                            <td>{item.profiles?.full_name || item.user_id}</td>
+                            <td>{money(item.amount)}</td>
+                            <td style={{ overflowWrap: 'anywhere' }}>{item.wallet_address}</td>
+                            <td>{item.status}</td>
+                            <td>
+                              <div className="actions">
+                                {item.status === 'pending' && (
+                                  <>
+                                    <button disabled={busy} onClick={() => reviewWithdrawal(item.id, 'approve')}>Approve</button>
+                                    <button className="danger" disabled={busy} onClick={() => reviewWithdrawal(item.id, 'reject')}>Reject</button>
+                                  </>
+                                )}
+                                {item.status === 'approved' && (
+                                  <>
+                                    <button disabled={busy} onClick={() => reviewWithdrawal(item.id, 'paid')}>Mark paid</button>
+                                    <button className="danger" disabled={busy} onClick={() => reviewWithdrawal(item.id, 'reject')}>Reject & refund</button>
+                                  </>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                        {!adminWithdrawals.length && <tr><td colSpan="5">No withdrawal requests found.</td></tr>}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
 
-      {message && (
-        <p className="status-message" role="status">{message}</p>
-      )}
+                <div className="card">
+                  <h2>Registered members</h2>
+                  <div className="tablewrap">
+                    <table className="table">
+                      <thead><tr><th>Name</th><th>Email</th><th>Username</th><th>Joined</th></tr></thead>
+                      <tbody>
+                        {members.map(member => (
+                          <tr key={member.id}>
+                            <td>{member.full_name}</td>
+                            <td>{member.email}</td>
+                            <td>{member.username}</td>
+                            <td>{new Date(member.created_at).toLocaleDateString()}</td>
+                          </tr>
+                        ))}
+                        {!members.length && <tr><td colSpan="4">No members found.</td></tr>}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="error">You are not authorised to access this page.</div>
+            )
+          )}
 
-      <footer><p>GOLDEN • Powered by Mubby</p></footer>
-    </main>
+          <footer className="center" style={{ marginTop: 45, borderTop: '1px solid #33270e', paddingTop: 20 }}>
+            <div className="brand" style={{ fontSize: 18 }}>GOLDEN</div>
+            <p className="small">Member rewards and account management</p>
+            <p className="small">Payments and withdrawals use USDT BEP20.</p>
+          </footer>
+        </div>
+      </div>
+    </>
   )
 }
+
+export default App
