@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { supabase } from './supabase'
 
 const plans = [
   { id: 'starter', name: 'GOLDEN STARTER', price: 1, daily: 1, days: 30 },
@@ -6,13 +7,54 @@ const plans = [
 ]
 
 export default function App() {
-  const [selectedPlan, setSelectedPlan] = useState(null)
+  const [plan, setPlan] = useState(null)
   const [page, setPage] = useState('home')
+  const [message, setMessage] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [form, setForm] = useState({
+    fullName: '', username: '', email: '', password: '', referralCode: ''
+  })
+
+  function update(field, value) {
+    setForm(old => ({ ...old, [field]: value }))
+  }
+
+  async function register(event) {
+    event.preventDefault()
+    setLoading(true)
+    setMessage('')
+
+    try {
+      const initData = window.Telegram?.WebApp?.initData
+      if (!initData) throw new Error('Open GOLDEN through the Mubby Telegram bot.')
+
+      const { data, error } = await supabase.functions.invoke('create-account', {
+        body: { initData, ...form }
+      })
+
+      if (error) throw error
+      if (data?.error) throw new Error(data.error)
+
+      const { error: loginError } = await supabase.auth.signInWithPassword({
+        email: form.email.trim().toLowerCase(),
+        password: form.password
+      })
+
+      if (loginError) throw loginError
+
+      setMessage('Account created successfully. Your referral code is ' + data.referralCode)
+      setPage('home')
+    } catch (error) {
+      setMessage(error.message || 'Registration failed. Please try again.')
+    } finally {
+      setLoading(false)
+    }
+  }
 
   return (
     <main className="app">
       <header className="topbar">
-        <div className="brand"><span>♛</span> GOLDEN</div>
+        <div className="brand">♛ GOLDEN</div>
         <div className="badge">MEMBER ACCESS</div>
       </header>
 
@@ -23,54 +65,79 @@ export default function App() {
         <p className="subtitle">Your rewards. Your community. Your journey.</p>
       </section>
 
-      <section className="notice">
-        <strong>Choose your membership plan</strong>
-        <p>Select a plan to continue with registration and payment.</p>
-      </section>
+      {message && <div className="notice" role="status">{message}</div>}
 
-      <section className="plans">
-        {plans.map(plan => (
-          <button
-            key={plan.id}
-            className={`plan ${selectedPlan?.id === plan.id ? 'selected' : ''}`}
-            onClick={() => setSelectedPlan(plan)}
-          >
-            <span className="plan-name">{plan.name}</span>
-            <span className="price">${plan.price.toFixed(2)}</span>
-            <span className="daily">${plan.daily.toFixed(2)} daily reward</span>
-            <span className="duration">{plan.days} days</span>
-            <span className="choose">
-              {selectedPlan?.id === plan.id ? '✓ SELECTED' : 'SELECT PLAN'}
-            </span>
-          </button>
-        ))}
-      </section>
+      {page === 'home' && (
+        <>
+          <section className="notice">
+            <strong>Choose your membership plan</strong>
+            <p>Select a plan to continue with registration.</p>
+          </section>
 
-      {selectedPlan && (
-        <section className="selected-summary">
-          <p>Selected: <strong>{selectedPlan.name}</strong></p>
-          <p>Registration: <strong>${selectedPlan.price.toFixed(2)}</strong></p>
-          <p>Daily reward: <strong>${selectedPlan.daily.toFixed(2)}</strong></p>
-          <p>Duration: <strong>{selectedPlan.days} days</strong></p>
-          <button className="primary" onClick={() => setPage('register')}>
-            CONTINUE TO REGISTRATION
-          </button>
-        </section>
+          <section className="plans">
+            {plans.map(item => (
+              <button
+                key={item.id}
+                className={`plan ${plan?.id === item.id ? 'selected' : ''}`}
+                onClick={() => setPlan(item)}
+              >
+                <span className="plan-name">{item.name}</span>
+                <span className="price">${item.price.toFixed(2)}</span>
+                <span className="daily">${item.daily.toFixed(2)} daily reward</span>
+                <span className="duration">{item.days} days</span>
+                <span className="choose">
+                  {plan?.id === item.id ? '✓ SELECTED' : 'SELECT PLAN'}
+                </span>
+              </button>
+            ))}
+          </section>
+
+          {plan && (
+            <section className="selected-summary">
+              <p>Selected: <strong>{plan.name}</strong></p>
+              <p>Registration: <strong>${plan.price.toFixed(2)}</strong></p>
+              <button className="primary" onClick={() => setPage('register')}>
+                CONTINUE TO REGISTRATION
+              </button>
+            </section>
+          )}
+        </>
       )}
 
-      {page === 'register' && selectedPlan && (
-        <section className="registration">
+      {page === 'register' && (
+        <form className="registration" onSubmit={register}>
           <h2>Create your GOLDEN account</h2>
-          <p>Plan: {selectedPlan.name}</p>
-          <input placeholder="Full name" />
-          <input placeholder="Username" />
-          <input type="email" placeholder="Email address" />
-          <input type="password" placeholder="Create password" />
-          <button className="primary" onClick={() => alert('Registration will be connected to secure account services next.')}>
-            CONTINUE
+          <p>Selected plan: {plan?.name}</p>
+
+          <input required placeholder="Full name"
+            value={form.fullName}
+            onChange={e => update('fullName', e.target.value)} />
+
+          <input required placeholder="Username"
+            value={form.username}
+            onChange={e => update('username', e.target.value)} />
+
+          <input required type="email" placeholder="Email address"
+            value={form.email}
+            onChange={e => update('email', e.target.value)} />
+
+          <input required type="password" minLength="10"
+            placeholder="Create password (10 characters minimum)"
+            value={form.password}
+            onChange={e => update('password', e.target.value)} />
+
+          <input placeholder="Referral code (optional)"
+            value={form.referralCode}
+            onChange={e => update('referralCode', e.target.value)} />
+
+          <button className="primary" disabled={loading}>
+            {loading ? 'CREATING ACCOUNT...' : 'CREATE ACCOUNT'}
           </button>
-          <button className="back" onClick={() => setPage('home')}>Back to plans</button>
-        </section>
+
+          <button type="button" className="back" onClick={() => setPage('home')}>
+            Back to plans
+          </button>
+        </form>
       )}
 
       <footer>GOLDEN © 2026 · Rewards and community platform</footer>
