@@ -95,6 +95,7 @@ export default function App() {
     if (authError) throw authError
 
     if (!authData.user) {
+      setProfile(null)
       setPage('home')
       return
     }
@@ -113,8 +114,12 @@ export default function App() {
       data.is_admin ||
       String(data.telegram_id) === OWNER_TELEGRAM_ID
     ) {
-      setPage('admin')
-      await loadAdminData()
+      if (nextPage === 'member') {
+        setPage('admin')
+        await loadAdminData()
+      } else {
+        setPage(nextPage)
+      }
     } else {
       setPage(nextPage)
 
@@ -189,6 +194,39 @@ export default function App() {
     if (!w.error) setWithdrawals(w.data || [])
   }
 
+  function goHome() {
+    setMessage('')
+    setPage('home')
+  }
+
+  async function openMemberDashboard() {
+    setLoading(true)
+    setMessage('')
+
+    try {
+      await loadMemberData()
+      setPage('member')
+    } catch (error) {
+      setMessage(error.message || 'Unable to load dashboard.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function openAdminDashboard() {
+    setLoading(true)
+    setMessage('')
+
+    try {
+      await loadAdminData()
+      setPage('admin')
+    } catch (error) {
+      setMessage(error.message || 'Unable to load admin dashboard.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
   function updateForm(event) {
     setForm({
       ...form,
@@ -215,6 +253,7 @@ export default function App() {
 
       if (error) {
         let details = ''
+
         try {
           details = await error.context.json()
         } catch {
@@ -351,6 +390,7 @@ export default function App() {
       if (data?.error) throw new Error(data.error)
 
       await loadMemberData()
+
       setMessage(
         `Reward claimed: $${Number(data.claimed_amount).toFixed(2)}`
       )
@@ -392,22 +432,15 @@ export default function App() {
     }
   }
 
-  async function copyText(value) {
-    try {
-      await navigator.clipboard.writeText(value)
-      setMessage('Copied.')
-    } catch {
-      setMessage('Please copy the text manually.')
-    }
-  }
-
   async function logout() {
     await supabase.auth.signOut()
+
     setProfile(null)
     setMembership(null)
     setCycle(null)
-    setPage('home')
+    setTransactions([])
     setMessage('You have logged out.')
+    setPage('home')
   }
 
   const claimTime = cycle
@@ -420,6 +453,11 @@ export default function App() {
   const completedDays = transactions.filter(
     item => item.type === 'reward'
   ).length
+
+  const isAdmin = Boolean(
+    profile?.is_admin ||
+    String(profile?.telegram_id) === OWNER_TELEGRAM_ID
+  )
 
   if (!telegramChecked) {
     return (
@@ -456,7 +494,9 @@ export default function App() {
   return (
     <main className="app">
       <header className="topbar">
-        <div className="brand">GOLDEN</div>
+        <button className="brand brand-button" onClick={goHome}>
+          GOLDEN
+        </button>
         <span className="badge">MEMBERSHIP</span>
       </header>
 
@@ -485,44 +525,100 @@ export default function App() {
             ))}
           </section>
 
-          <button className="primary" onClick={() => setPage('register')}>
-            Create account
-          </button>
+          {profile ? (
+            <section className="home-account">
+              <p>Welcome back, {profile.full_name}.</p>
 
-          <button className="back" onClick={() => setPage('login')}>
-            Already registered? Login
-          </button>
+              {isAdmin ? (
+                <button
+                  className="primary"
+                  onClick={openAdminDashboard}
+                  disabled={loading}
+                >
+                  {loading ? 'Loading...' : 'OPEN ADMIN DASHBOARD'}
+                </button>
+              ) : (
+                <button
+                  className="primary"
+                  onClick={openMemberDashboard}
+                  disabled={loading}
+                >
+                  {loading ? 'Loading...' : 'MY MEMBER DASHBOARD'}
+                </button>
+              )}
+
+              <button className="back" onClick={logout}>
+                Logout
+              </button>
+            </section>
+          ) : (
+            <>
+              <button className="primary" onClick={() => setPage('register')}>
+                Create account
+              </button>
+
+              <button className="back" onClick={() => setPage('login')}>
+                Already registered? Login
+              </button>
+            </>
+          )}
         </>
       )}
 
       {page === 'register' && (
         <section className="registration">
+          <button className="back" onClick={goHome}>← BACK TO HOME</button>
+
           <h2>Create your GOLDEN account</h2>
 
           <form onSubmit={register}>
-            <input name="fullName" placeholder="Full name"
-              value={form.fullName} onChange={updateForm} required />
+            <input
+              name="fullName"
+              placeholder="Full name"
+              value={form.fullName}
+              onChange={updateForm}
+              required
+            />
 
-            <input name="username" placeholder="Username"
-              value={form.username} onChange={updateForm} required />
+            <input
+              name="username"
+              placeholder="Username"
+              value={form.username}
+              onChange={updateForm}
+              required
+            />
 
-            <input name="email" type="email" placeholder="Email address"
-              value={form.email} onChange={updateForm} required />
+            <input
+              name="email"
+              type="email"
+              placeholder="Email address"
+              value={form.email}
+              onChange={updateForm}
+              required
+            />
 
-            <input name="password" type="password"
+            <input
+              name="password"
+              type="password"
               placeholder="Password (minimum 10 characters)"
-              value={form.password} onChange={updateForm}
-              minLength={10} required />
+              value={form.password}
+              onChange={updateForm}
+              minLength={10}
+              required
+            />
 
-            <input name="referralCode" placeholder="Referral code (optional)"
-              value={form.referralCode} onChange={updateForm} />
+            <input
+              name="referralCode"
+              placeholder="Referral code (optional)"
+              value={form.referralCode}
+              onChange={updateForm}
+            />
 
             <button className="primary" disabled={loading}>
               {loading ? 'Creating account...' : 'Create account'}
             </button>
           </form>
 
-          <button className="back" onClick={() => setPage('home')}>Back</button>
           <button className="back" onClick={() => setPage('login')}>
             Already registered? Login
           </button>
@@ -531,26 +627,38 @@ export default function App() {
 
       {page === 'login' && (
         <section className="registration">
+          <button className="back" onClick={goHome}>← BACK TO HOME</button>
+
           <h2>Login to GOLDEN</h2>
 
           <form onSubmit={login}>
-            <input type="email" placeholder="Email address"
-              value={email} onChange={e => setEmail(e.target.value)} required />
+            <input
+              type="email"
+              placeholder="Email address"
+              value={email}
+              onChange={e => setEmail(e.target.value)}
+              required
+            />
 
-            <input type="password" placeholder="Password"
-              value={password} onChange={e => setPassword(e.target.value)} required />
+            <input
+              type="password"
+              placeholder="Password"
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              required
+            />
 
             <button className="primary" disabled={loading}>
               {loading ? 'Logging in...' : 'Login'}
             </button>
           </form>
-
-          <button className="back" onClick={() => setPage('home')}>Back</button>
         </section>
       )}
 
       {page === 'payment' && (
         <section className="registration">
+          <button className="back" onClick={goHome}>← BACK TO HOME</button>
+
           <h2>Complete your payment</h2>
           <p>Plan: {selectedPlan.name}</p>
           <h2>${selectedPlan.price} USDT</h2>
@@ -564,24 +672,32 @@ export default function App() {
           </button>
 
           <form onSubmit={submitPayment}>
-            <input value={transactionHash}
+            <input
+              value={transactionHash}
               onChange={e => setTransactionHash(e.target.value)}
-              placeholder="Paste transaction hash" required />
+              placeholder="Paste transaction hash"
+              required
+            />
 
             <button className="primary" disabled={loading}>
               {loading ? 'Submitting...' : 'Submit payment'}
             </button>
           </form>
-
-          <button className="back" onClick={() => setPage('home')}>Back</button>
         </section>
       )}
 
       {page === 'pending' && (
         <section className="hero">
+          <button className="back" onClick={goHome}>← BACK TO HOME</button>
+
           <h2>Payment submitted</h2>
           <p>Your payment is awaiting admin verification.</p>
-          <button className="primary" onClick={() => loadProfile('member')}>
+
+          <button
+            className="primary"
+            onClick={() => loadProfile('member')}
+            disabled={loading}
+          >
             Refresh membership status
           </button>
         </section>
@@ -589,6 +705,8 @@ export default function App() {
 
       {page === 'member' && (
         <section className="member-dashboard">
+          <button className="back" onClick={goHome}>← BACK TO HOME</button>
+
           <div className="member-heading">
             <span className="eyebrow">YOUR GOLDEN ACCOUNT</span>
             <h2>Welcome, {profile?.full_name || 'Member'}</h2>
@@ -598,7 +716,7 @@ export default function App() {
             <div className="notice">
               <strong>No membership found</strong>
               <p>Choose a plan to get started.</p>
-              <button className="primary" onClick={() => setPage('home')}>
+              <button className="primary" onClick={goHome}>
                 View membership plans
               </button>
             </div>
@@ -608,7 +726,11 @@ export default function App() {
             <div className="notice">
               <strong>Payment awaiting approval</strong>
               <p>Your membership will activate after admin verification.</p>
-              <button className="primary" onClick={() => loadMemberData()}>
+              <button
+                className="primary"
+                onClick={() => loadMemberData()}
+                disabled={loading}
+              >
                 Refresh status
               </button>
             </div>
@@ -654,8 +776,11 @@ export default function App() {
                     </div>
 
                     {isClaimable ? (
-                      <button className="primary claim-button"
-                        disabled={loading} onClick={claimReward}>
+                      <button
+                        className="primary claim-button"
+                        disabled={loading}
+                        onClick={claimReward}
+                      >
                         {loading ? 'Claiming...' : 'CLAIM REWARD'}
                       </button>
                     ) : (
@@ -667,8 +792,11 @@ export default function App() {
                 ) : (
                   <>
                     <div className="timer-label">READY FOR YOUR NEXT CYCLE?</div>
-                    <button className="primary start-button"
-                      disabled={loading} onClick={startReward}>
+                    <button
+                      className="primary start-button"
+                      disabled={loading}
+                      onClick={startReward}
+                    >
                       {loading ? 'Starting...' : 'START'}
                     </button>
                   </>
@@ -680,6 +808,7 @@ export default function App() {
                 <p>
                   Completed cycles: {completedDays} / {membership.plans?.duration_days || 0}
                 </p>
+
                 <div className="progress-track">
                   <div
                     className="progress-fill"
@@ -691,6 +820,7 @@ export default function App() {
                     }}
                   />
                 </div>
+
                 <p>
                   Membership expires: {
                     membership.expires_at
@@ -702,9 +832,11 @@ export default function App() {
 
               <div className="progress-card">
                 <h3>RECENT REWARDS</h3>
+
                 {transactions.length === 0 && (
                   <p className="muted">No rewards claimed yet.</p>
                 )}
+
                 {transactions.map(item => (
                   <div className="history-row" key={item.id}>
                     <span>{new Date(item.created_at).toLocaleDateString()}</span>
@@ -715,7 +847,11 @@ export default function App() {
             </>
           )}
 
-          <button className="back" onClick={() => loadMemberData()}>
+          <button
+            className="back"
+            onClick={() => loadMemberData()}
+            disabled={loading}
+          >
             Refresh dashboard
           </button>
 
@@ -725,6 +861,8 @@ export default function App() {
 
       {page === 'admin' && (
         <section className="registration">
+          <button className="back" onClick={goHome}>← BACK TO HOME</button>
+
           <h2>GOLDEN Admin Dashboard</h2>
           <p>Welcome, {profile?.full_name || 'Admin'}</p>
 
@@ -735,6 +873,7 @@ export default function App() {
           </div>
 
           <h3>Recent members</h3>
+
           {members.slice(0, 10).map(member => (
             <p key={member.id}>
               {member.full_name} — {member.email}
@@ -742,6 +881,7 @@ export default function App() {
           ))}
 
           <h3>Deposit submissions</h3>
+
           {deposits.length === 0 && <p>No deposits submitted.</p>}
 
           {deposits.slice(0, 20).map(deposit => (
@@ -753,15 +893,19 @@ export default function App() {
 
               {deposit.status === 'pending' && (
                 <div className="admin-actions">
-                  <button className="primary"
+                  <button
+                    className="primary"
                     disabled={loading}
-                    onClick={() => reviewDeposit(deposit.id, 'approve')}>
+                    onClick={() => reviewDeposit(deposit.id, 'approve')}
+                  >
                     Approve
                   </button>
 
-                  <button className="danger"
+                  <button
+                    className="danger"
                     disabled={loading}
-                    onClick={() => reviewDeposit(deposit.id, 'reject')}>
+                    onClick={() => reviewDeposit(deposit.id, 'reject')}
+                  >
                     Reject
                   </button>
                 </div>
@@ -770,6 +914,7 @@ export default function App() {
           ))}
 
           <h3>Recent withdrawals</h3>
+
           {withdrawals.slice(0, 10).map(item => (
             <div className="admin-item" key={item.id}>
               <strong>{item.amount} USDT</strong>
@@ -777,12 +922,23 @@ export default function App() {
             </div>
           ))}
 
-          <button className="back" onClick={loadAdminData}>Refresh</button>
+          <button
+            className="back"
+            onClick={loadAdminData}
+            disabled={loading}
+          >
+            Refresh
+          </button>
+
           <button className="back" onClick={logout}>Logout</button>
         </section>
       )}
 
-      {message && <p className="status-message" role="status">{message}</p>}
+      {message && (
+        <p className="status-message" role="status">
+          {message}
+        </p>
+      )}
 
       <footer>
         <p>GOLDEN • Powered by Mubby</p>
